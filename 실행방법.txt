@@ -1,0 +1,37 @@
+낙상 의심 감지 - 실행 방법 (카메라 + 대시보드)
+========================================
+
+[1] 로봇 터미널: bringup + 카메라
+----------------------------------------
+먼저 로봇에 접속:
+ssh ubuntu@192.168.0.154
+
+접속 후 이 한 줄 실행:
+ros2 run v4l2_camera v4l2_camera_node > /dev/null 2>&1 & ros2 launch turtlebot3_bringup robot.launch.py
+
+끄기: Ctrl+C (bringup 종료) 후
+pkill -f v4l2_camera
+
+
+[2] PC 터미널: 서버 + 영상(web_video_server)
+----------------------------------------
+ros2 run web_video_server web_video_server > /dev/null 2>&1 & cd ~/project_3-main/backend && .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+끄기: Ctrl+C (서버 종료) 후
+pkill -f web_video_server
+
+
+[3] 브라우저
+----------------------------------------
+이 PC:      http://localhost:8000
+다른 기기:  http://192.168.0.50:8000
+
+
+참고
+----------------------------------------
+- 로봇과 PC의 ROS_DOMAIN_ID가 같아야 함 (지금 33). 확인: echo $ROS_DOMAIN_ID
+- 순서는 상관없음. 대시보드는 영상이 끊기면 5초마다 다시 연결함
+- 영상이 안 나오면 대시보드에서 F5 (안 되면 Ctrl+Shift+R)
+- localhost:8080에서 /image_raw 원본 토픽을 누르지 말 것 (와이파이가 꽉 차서 영상이 멈춤)
+- "주소가 이미 사용 중(address already in use)" 에러가 나면 이미 떠 있는 것:
+  pkill -f "uvicorn app.main:app"; pkill -f web_video_server

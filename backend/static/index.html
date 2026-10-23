@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>낙상 의심 감지</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div>
+        <h1>낙상 의심 감지</h1>
+        <span class="subtitle">TurtleBot3 Patrol Monitor</span>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span id="clock" class="clock">--:--:--</span>
+      <span id="connection" class="status-pill status-wait"><i></i><span>연결 중</span></span>
+    </div>
+  </header>
+
+  <section id="banner" class="banner" hidden></section>
+
+  <main class="top">
+    <section class="card camera-card">
+      <div class="card-head">
+        <div class="title"><span class="eyebrow">Camera</span><h2>실시간 카메라</h2></div>
+        <span id="live-badge" class="live live-off"><i></i><span>OFFLINE</span></span>
+      </div>
+      <div class="camera-stage">
+        <div class="camera">
+          <img id="video" alt="로봇 카메라 영상">
+          <div class="camera-corners"></div>
+          <div class="camera-overlay">
+            <span id="camera-time" class="overlay-chip">--:--:--</span>
+            <span id="camera-topic" class="overlay-chip"></span>
+          </div>
+          <div id="video-empty" class="camera-empty">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M2 2l20 20M10.4 6H14l2 2h3a1 1 0 011 1v8.6M17 19H5a1 1 0 01-1-1V9a1 1 0 011-1h2.6M9.9 11.3a3 3 0 004.3 4.2" />
+            </svg>
+            <strong id="video-message">영상 연결 중</strong>
+            <span id="video-hint"></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="side">
+      <section class="card map-card">
+        <div class="card-head">
+          <div class="title"><span class="eyebrow">Map</span><h2>순찰 지도</h2></div>
+          <ul class="legend">
+            <li><i class="dot dot-robot"></i>로봇</li>
+            <li><i class="dot dot-confirmed"></i>낙상 의심</li>
+            <li><i class="dot dot-uncertain"></i>판단 불가</li>
+            <li><i class="dot dot-active"></i>관찰·확인</li>
+            <li><i class="dot dot-done"></i>종료</li>
+          </ul>
+        </div>
+        <div id="map-wrap" class="map-wrap">
+          <canvas id="map"></canvas>
+          <p id="map-empty" class="empty">지도 불러오는 중</p>
+        </div>
+      </section>
+
+      <section class="card robot-card">
+        <div class="robot-row">
+          <div id="robot-hero" class="robot-hero state-idle">
+            <span class="robot-icon"><i></i></span>
+            <div class="robot-text">
+              <span class="eyebrow">Robot</span>
+              <strong id="robot-state">-</strong>
+              <span id="robot-sub">상태 수신 대기</span>
+            </div>
+          </div>
+          <div class="tiles">
+            <div class="tile"><span>X</span><strong id="robot-x">-</strong></div>
+            <div class="tile"><span>Y</span><strong id="robot-y">-</strong></div>
+            <div class="tile"><span>방향</span><strong id="robot-heading">-</strong></div>
+            <div class="tile"><span>갱신</span><strong id="robot-age">-</strong></div>
+          </div>
+        </div>
+        <ol id="robot-steps" class="steps">
+          <li data-state="patrol">순찰</li>
+          <li data-state="suspect">의심</li>
+          <li data-state="approach">접근</li>
+          <li data-state="observe">관찰</li>
+          <li data-state="alert">알림</li>
+        </ol>
+      </section>
+    </div>
+  </main>
+
+  <section class="bottom">
+    <section class="card events-card">
+      <div class="card-head">
+        <div class="title"><span class="eyebrow">Events</span><h2>이벤트 기록</h2></div>
+        <nav id="filters" class="tabs"></nav>
+      </div>
+      <div class="scroll">
+        <table class="events">
+          <thead>
+            <tr><th>사진</th><th>시간</th><th>상태</th><th>위치</th><th>신뢰도</th></tr>
+          </thead>
+          <tbody id="event-rows"></tbody>
+        </table>
+        <p id="events-empty" class="empty-row" hidden>이벤트가 없습니다</p>
+      </div>
+    </section>
+
+    <section class="card log-card">
+      <div class="card-head">
+        <div class="title"><span class="eyebrow">Activity</span><h2>실시간 로그</h2></div>
+        <div class="log-tools">
+          <label class="switch"><input id="log-follow" type="checkbox" checked><span></span>자동 스크롤</label>
+          <button id="log-clear" class="btn btn-ghost btn-small">지우기</button>
+        </div>
+      </div>
+      <ol id="log" class="log scroll"></ol>
+    </section>
+  </section>
+
+  <dialog id="detail" class="detail">
+    <form method="dialog" class="detail-close"><button aria-label="닫기">✕</button></form>
+    <div id="detail-body"></div>
+    <label class="note">
+      <span>메모</span>
+      <textarea id="detail-note" rows="3" placeholder="현장 확인 내용 등"></textarea>
+    </label>
+    <div class="detail-foot">
+      <div id="detail-actions" class="actions"></div>
+      <button id="note-save" class="btn btn-ghost">메모 저장</button>
+    </div>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>
