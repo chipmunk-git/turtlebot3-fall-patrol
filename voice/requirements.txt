@@ -1,0 +1,4 @@
+# Voice dependencies for shared backend/.venv (Python 3.10; installed by the user).
+# Install alongside backend/requirements.txt for the shared environment.
+edge-tts==7.3.1
+-r stt/requirements.txt

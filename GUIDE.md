@@ -237,6 +237,21 @@ backend/
 
 `backend/`에서 실행한다.
 
+Mac 개인 개발에서는 **Python 3.10의 `backend/.venv`를 TTS·STT·서버 공용 환경**으로 사용한다.
+Python 3.10 확인, 최초 환경 생성, 통합 의존성 설치와 검증 명령은
+[README.md의 Mac 개인 개발 환경 안내](README.md)를 따른다. 생성·설치는 사용자가 직접 수행한다.
+Mac에서 이미 공용 환경을 준비했다면 아래 환경 생성 단계는 다시 실행하지 않는다.
+
+```bash
+cd ~/robotech/project_ws
+source backend/.venv/bin/activate
+python --version  # Python 3.10.x
+cd backend
+```
+
+아래는 Linux/Windows의 서버 최초 준비와 `backend/` 내부 실행 예시다.
+가상환경 생성·설치는 처음 준비할 때만 수행하고, 이미 준비했다면 실행 명령부터 사용한다.
+
 ```
 # 처음 한 번 (윈도우는 py -3.10 -m venv .venv, .venv\Scripts\activate)
 python3 -m venv .venv

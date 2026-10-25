@@ -1,10 +1,51 @@
-낙상 의심 감지 - 실행 방법 (카메라 + 대시보드)
+개인 음성·서버 / 로봇 통합 실행 안내
+========================================
+
+[A] Mac 개인 개발: Python 3.10 + backend/.venv 공용 환경
+----------------------------------------
+TTS·STT·서버는 같은 backend/.venv를 사용한다.
+Python 3.10이 준비되어 있다는 전제에서, 최초 환경 생성과 통합 의존성 설치는
+README.md의 'Mac 개인 개발 환경 (Python 3.10)' 절차를 사용자가 직접 진행한다.
+이미 준비된 가상환경을 자동으로 다시 생성하지 않는다.
+
+새 터미널마다 프로젝트 루트에서 활성화:
+cd ~/robotech/project_ws
+source backend/.venv/bin/activate
+python --version
+정상 버전: Python 3.10.x
+
+TTS 도구 확인:
+python -m edge_tts --version
+
+STT (마이크로 5초 녹음 → 한국어 인식 → 등록 표현 분류):
+python voice/stt/record_korean.py
+
+입력 장치 확인:
+python voice/stt/record_korean.py --list-devices
+
+서버 (다른 Mac 터미널):
+cd ~/robotech/project_ws
+source backend/.venv/bin/activate
+python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
+
+대시보드: http://127.0.0.1:8000
+API 문서: http://127.0.0.1:8000/docs
+서버 종료: 해당 터미널에서 Ctrl+C
+
+마이크 없이 모의 테스트 (프로젝트 루트의 공용 환경에서):
+python -B -m unittest discover -s voice/stt -p 'test_*.py' -v
+정상 결과: Ran 18 tests ... / OK
+
+아래 [B]는 Ubuntu/ROS2와 실제 로봇·카메라를 위한 기존 실행 절차다.
+Mac의 음성·서버 개발에서는 [A]를 사용한다.
+
+[B] Ubuntu/ROS2 - 실행 방법 (카메라 + 대시보드)
 ========================================
 
 [1] 로봇 터미널: bringup + 카메라
 ----------------------------------------
-먼저 로봇에 접속:
-ssh ubuntu@192.168.0.154
+먼저 로봇에 접속(ROBOT_IP를 실제 로봇 주소로 변경):
+ssh ubuntu@ROBOT_IP
 
 접속 후 이 한 줄 실행:
 ros2 run v4l2_camera v4l2_camera_node > /dev/null 2>&1 & ros2 launch turtlebot3_bringup robot.launch.py
@@ -15,7 +56,7 @@ pkill -f v4l2_camera
 
 [2] PC 터미널: 서버 + 영상(web_video_server)
 ----------------------------------------
-ros2 run web_video_server web_video_server > /dev/null 2>&1 & cd ~/project_3-main/backend && .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+ros2 run web_video_server web_video_server > /dev/null 2>&1 & cd ~/robotech/project_ws/backend && .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 끄기: Ctrl+C (서버 종료) 후
 pkill -f web_video_server
@@ -24,7 +65,7 @@ pkill -f web_video_server
 [3] 브라우저
 ----------------------------------------
 이 PC:      http://localhost:8000
-다른 기기:  http://192.168.0.50:8000
+다른 기기:  http://SERVER_IP:8000 (SERVER_IP를 서버 PC의 실제 주소로 변경)
 
 
 참고

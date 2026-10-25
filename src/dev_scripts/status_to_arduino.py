@@ -14,6 +14,8 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
 
+REFRESH_INTERVAL = 1.0
+
 # LCD lines are ASCII and limited to 16 characters each for a 1602 display.
 STATES = {
     "idle": ("0,0,0", "IDLE|STANDBY", None),
@@ -51,6 +53,7 @@ def main():
         print("[주의] Arduino 브리지의 RGB/LCD 구독자를 아직 발견하지 못했습니다.", flush=True)
     publish_twice(power_pub, Bool(data=True))
     last_state = None
+    last_publish = 0.0
     warned = False
     try:
         while True:
@@ -58,15 +61,19 @@ def main():
                 with urlopen(url, timeout=1.0) as res:
                     state = json.load(res)["state"]
                 warned = False
-                if state != last_state:
+                now = time.monotonic()
+                if state != last_state or now - last_publish >= REFRESH_INTERVAL:
                     if state in STATES:
                         rgb, lcd, spoken = STATES[state]
                         publish_twice(rgb_pub, String(data=rgb))
                         publish_twice(lcd_pub, String(data=lcd))
-                        print(f"[상태] {state:<8} LED={rgb} LCD={lcd}", flush=True)
-                        if spoken:
-                            print(f"[가상 스피커] {spoken}", flush=True)
-                    else:
+                        publish_twice(power_pub, Bool(data=True))
+                        last_publish = now
+                        if state != last_state:
+                            print(f"[상태] {state:<8} LED={rgb} LCD={lcd}", flush=True)
+                            if spoken:
+                                print(f"[가상 스피커] {spoken}", flush=True)
+                    elif state != last_state:
                         print(f"[주의] 알 수 없는 상태: {state!r}", flush=True)
                     last_state = state
             except (URLError, TimeoutError, OSError, KeyError, ValueError) as error:

@@ -278,3 +278,9 @@ GitHub.sublime-settings
 
 # Keep the development scripts directory excluded from colcon
 !/src/dev_scripts/COLCON_IGNORE
+
+# Voice model cache (virtual environments are excluded above)
+.models/
+
+# macOS Finder metadata
+.DS_Store

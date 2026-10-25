@@ -39,7 +39,12 @@ TurtleBot3 Waffle-Pi가 실내를 순찰하며 낙상 의심 상황을 발견하
 ```text
 project_ws/
 ├── arduino/tb3_io/tb3_io.ino       # Arduino 펌웨어
-├── backend/                        # FastAPI 서버·웹 화면·모의 로봇
+├── backend/                        # FastAPI 서버·웹 화면·모의 로봇; 공용 .venv 위치
+├── voice/                          # 음성 입출력 코드·문서·안내 MP3
+│   ├── README.md
+│   ├── requirements.txt            # TTS·STT 의존성
+│   ├── tts/                        # observe.mp3, alert.mp3
+│   └── stt/                        # 녹음·Whisper·등록 표현 분류·테스트
 ├── docs/API.md                     # ROS2·서버 연동 API 안내
 ├── src/
 │   ├── fall_patrol_bridge/         # ROS2 → 서버
@@ -53,6 +58,87 @@ project_ws/
 ```
 
 `build/`, `install/`, `log/`, 가상환경 및 실행 중 생성되는 DB·스냅샷은 Git 관리 대상에서 제외합니다. `src/dev_scripts/`는 독립 실행형 스크립트를 모아 둔 곳으로, ROS2 패키지 자체는 아닙니다.
+
+## Mac 개인 개발 환경 (Python 3.10)
+
+Mac에서는 **Python 3.10**으로 만든 **`backend/.venv` 하나를 TTS·STT·서버 공용 환경**으로 사용합니다.
+음성 파일과 코드는 `voice/tts/`, `voice/stt/`에서 관리합니다. 코드·문서·안내 MP3는 커밋 대상이며, 가상환경과 Whisper 모델 캐시는 Git에서 제외합니다.
+이 절차는 Mac의 개인 음성·서버 개발용이며, 아래 Ubuntu/ROS2 장치 연동 절차는 해당 Linux 환경에서 실행합니다.
+환경 생성과 설치는 사용자가 직접 진행합니다. Python 3.10 계열은 공식 지원이 종료된 버전입니다.
+
+### 최초 준비: 공용 가상환경
+
+**Python 3.10이 설치되어 있고, 터미널에서 `python3.10` 명령을 사용할 수 있다는 전제**입니다.
+Python 설치 방법은 각자의 개발 환경에 맞게 선택합니다.
+아래 예시의 프로젝트 경로는 `~/robotech/project_ws`입니다. 저장소를 다른 곳에 두었다면 실제 경로로 바꿉니다.
+`backend/.venv` 생성은 해당 폴더가 없을 때 한 번만 합니다.
+
+```bash
+cd ~/robotech/project_ws
+python3.10 --version
+
+if [ ! -e backend/.venv ]; then
+    python3.10 -m venv backend/.venv
+fi
+source backend/.venv/bin/activate
+python --version
+python -c 'import sys; print(sys.executable)'
+```
+
+버전은 `Python 3.10.x` 형식이면 되며, 마지막 패치 번호는 고정하지 않습니다. 실행 경로는 프로젝트 루트 아래의 `backend/.venv/bin/python`을 가리켜야 합니다.
+다른 버전이면 설치를 진행하기 전에 실행 경로를 확인합니다. 기존 가상환경을 자동으로 삭제하거나 덮어쓰지 않습니다.
+
+공용 환경이 활성화된 같은 터미널에서 두 의존성 목록을 함께 설치합니다.
+주요 Whisper 의존성은 호환성을 검토한 버전으로 지정합니다.
+
+```bash
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install \
+  -r backend/requirements.txt \
+  -r voice/requirements.txt \
+  "torch==2.8.0" \
+  "numpy==1.26.4" \
+  "numba==0.60.0" \
+  "llvmlite==0.43.0"
+python -m pip check
+```
+
+`voice/requirements.txt`는 TTS·STT 의존성 목록입니다. 서버 목록과 함께 설치한 뒤 다음 검증·실행 명령을 사용합니다.
+
+### 설치 확인과 실행
+
+```bash
+cd ~/robotech/project_ws
+source backend/.venv/bin/activate
+python -c 'import edge_tts, whisper, torch, numpy, sounddevice, fastapi, uvicorn, sqlalchemy, python_multipart, yaml; print("TTS/STT/서버 import OK")'
+python -B -m unittest discover -s voice/stt -p 'test_*.py' -v
+```
+
+정상 결과는 `pip check`의 `No broken requirements found.`, import 검사의 `TTS/STT/서버 import OK`,
+모의 테스트의 `Ran 18 tests`와 `OK`입니다. 실제 마이크·인식 품질과 TTS 서비스 연결은 별도 실행으로 확인합니다.
+
+프로젝트 루트에서 같은 환경으로 실행합니다. 서버와 STT를 동시에 쓸 때는 각각 다른 터미널에서 활성화합니다.
+
+```bash
+cd ~/robotech/project_ws
+source backend/.venv/bin/activate
+
+# TTS 도구 확인
+python -m edge_tts --version
+
+# STT: 5초 녹음 → 한국어 인식 → 등록 표현 분류
+python voice/stt/record_korean.py
+```
+
+서버용 터미널:
+
+```bash
+cd ~/robotech/project_ws
+source backend/.venv/bin/activate
+python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
+```
+
+대시보드: `http://127.0.0.1:8000` · API 문서: `http://127.0.0.1:8000/docs`
 
 ## 빠른 실행: 웹 상태 → Arduino 표시 장치
 
@@ -174,6 +260,7 @@ Arduino Uno에는 RGB LED(D5·D6·D9), 부저(D8), 1602 I2C LCD(SDA=A4, SCL=A5)�
 
 ## 상세 문서
 
+- **[voice/README.md](voice/README.md)** — 공용 환경에서 TTS·STT 실행, 등록 표현 분류 및 모의 테스트
 - **[팀원 GUIDE.md](https://github.com/GGo-ri/project_3/blob/main/GUIDE.md)** — 백엔드·프런트엔드 설계, 감지 시나리오, 이벤트 상태, 무시 구역, DB, API 및 서버 운영
 - **[docs/API.md](docs/API.md)** — ROS2 주행·인식 기능과 서버의 API 연동 방법
 - **[src/README.md](src/README.md)** — `fall_patrol_bridge` 사용 방법과 ROS2 상태 토픽 안내 (일부 실행 경로는 과거 작업공간 기준이므로 현재 구조를 우선)
