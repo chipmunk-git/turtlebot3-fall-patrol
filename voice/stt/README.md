@@ -89,6 +89,29 @@ Whisper에 파일 경로를 전달하지 않으므로 이 프로그램의 인식
 녹음·인식 오류로 실패한 경우에는 응답 분류를 출력하지 않는다.
 이 분류는 서버 이벤트 상태를 바꾸지 않는다.
 
+## Python 함수로 재사용
+
+`record_korean.py`의 기존 터미널 실행은 그대로 사용할 수 있습니다.
+다른 Python 프로그램에서는 프로젝트 루트를 모듈 검색 경로에 두고 다음처럼 호출합니다.
+
+```python
+from voice.stt.record_korean import KoreanRecognizer
+
+recognizer = KoreanRecognizer()  # 입력 장치 확인 및 모델 준비
+result = recognizer.recognize()  # 5초 녹음 → 인식·분류 → dict 반환
+```
+
+준비한 객체는 여러 응답에 재사용할 수 있습니다. `device=...`로 입력 장치를 선택하며,
+호출은 순서대로 실행합니다. 정상 결과에는 `status`, `text`, `classification`,
+`record_seconds`, `transcribe_seconds`, `model_seconds`가 들어 있습니다.
+`model_seconds`는 객체를 처음 준비할 때 걸린 시간입니다. 기본적으로 진행 메시지는
+출력하지 않으며, 필요하면 생성할 때 `progress=print` 등 출력 함수를 지정합니다.
+
+준비 중 실패는 예외로 전달됩니다. 녹음·인식 실패는 `RecognitionError`로 전달하며
+`stage`는 `recording` 또는 `recognition`입니다. 녹음 중 실패나 `Ctrl+C`가 발생하면
+입력을 중단합니다. 안내 MP3 재생과 실패 결과 반환까지 연결하는 방법은
+[음성 입출력 README](../README.md)의 안내 재생 후 응답 인식 절차를 참고합니다.
+
 ## 마이크·모델 설치 없이 로직 테스트
 
 ```bash
