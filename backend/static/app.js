@@ -8,7 +8,7 @@ const CONFIG = {
   cameraFovDeg: 62,
   viewRangeM: 1.5,
   robotRadiusM: 0.12,
-  mapRotation: 90,
+  mapRotation: 0,
   doneEventHours: 24,
   bannerMaxItems: 3,
   logsIntervalMs: 700,
