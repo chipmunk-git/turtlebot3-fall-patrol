@@ -1,62 +1,49 @@
 개인 음성·서버 / 로봇 통합 실행 안내
 ========================================
 
-[A] Mac 개인 개발: Python 3.10 + backend/.venv 공용 환경
+Ubuntu Desktop 서버 PC 작업 경로: ~/robotech/project_ws/
+Pi 자체 개발 프로그램의 목표 경로와 기존 ROBOTIS 환경 구분은 README.md의
+'실행 환경과 작업 경로'를 따른다. Pi 새 경로로의 배치·실행은 아직 검증되지 않았다.
+
+[A] 개인 개발 환경
 ----------------------------------------
-TTS·STT·서버는 같은 backend/.venv를 사용한다.
-Python 3.10이 준비되어 있다는 전제에서, 최초 환경 생성과 통합 의존성 설치는
-README.md의 'Mac 개인 개발 환경 (Python 3.10)' 절차를 사용자가 직접 진행한다.
-이미 준비된 가상환경을 자동으로 다시 생성하지 않는다.
-
-새 터미널마다 프로젝트 루트에서 활성화:
-cd ~/robotech/project_ws
-source backend/.venv/bin/activate
-python --version
-정상 버전: Python 3.10.x
-
-TTS 도구 확인:
-python -m edge_tts --version
-
-STT (마이크로 5초 녹음 → 한국어 인식 → 등록 표현 분류):
-python voice/stt/record_korean.py
-
-입력 장치 확인:
-python voice/stt/record_korean.py --list-devices
-
-서버 (다른 Mac 터미널):
-cd ~/robotech/project_ws
-source backend/.venv/bin/activate
-python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
-
-대시보드: http://127.0.0.1:8000
-API 문서: http://127.0.0.1:8000/docs
-서버 종료: 해당 터미널에서 Ctrl+C
-
-마이크 없이 모의 테스트 (프로젝트 루트의 공용 환경에서):
-python -B -m unittest discover -s voice/stt -p 'test_*.py' -v
-정상 결과: Ran 18 tests ... / OK
+환경 생성·설치·활성화·설치 확인과 로컬 서버 실행 명령은
+README.md의 '개인 개발 환경 (Python 3.10)'에 모았다.
+개인 저장소 위치는 각자의 실제 경로를 사용한다.
+STT 단독 실행·안내 재생 후 인식·입력 장치 선택·모의 테스트 명령은
+voice/README.md를 참고한다.
 
 아래 [B]는 Ubuntu/ROS2와 실제 로봇·카메라를 위한 기존 실행 절차다.
-Mac의 음성·서버 개발에서는 [A]를 사용한다.
+개인 음성·서버 개발에서는 [A]를 사용한다.
 
 [B] Ubuntu/ROS2 - 실행 방법 (카메라 + 대시보드)
 ========================================
 
-[1] 로봇 터미널: bringup + 카메라
+[1] Raspberry Pi 터미널: 기존 ROBOTIS bringup + 카메라
 ----------------------------------------
 먼저 로봇에 접속(ROBOT_IP를 실제 로봇 주소로 변경):
 ssh ubuntu@ROBOT_IP
 
-접속 후 이 한 줄 실행:
+아래는 기존 ~/turtlebot3_ws/가 빌드되어 있고 카메라 패키지도 준비된 환경 기준이다.
+기존 ROBOTIS 작업공간을 유지하며, Pi 자체 개발용 목표 경로로 옮기는 절차가 아니다.
+접속 후 기존 ROS2 환경을 불러오고 실행:
+source /opt/ros/humble/setup.bash
+source ~/turtlebot3_ws/install/setup.bash
 ros2 run v4l2_camera v4l2_camera_node > /dev/null 2>&1 & ros2 launch turtlebot3_bringup robot.launch.py
 
 끄기: Ctrl+C (bringup 종료) 후
 pkill -f v4l2_camera
 
 
-[2] PC 터미널: 서버 + 영상(web_video_server)
+[2] Ubuntu Desktop 서버 PC 터미널: 서버 + 영상
 ----------------------------------------
-ros2 run web_video_server web_video_server > /dev/null 2>&1 & cd ~/robotech/project_ws/backend && .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+web_video_server가 현재 PC의 ROS2 환경에 준비되고 Pi의 카메라 토픽을 수신하는 전제다.
+별도 ROS2 오버레이를 사용한다면 해당 환경도 먼저 불러온다.
+source /opt/ros/humble/setup.bash
+cd ~/robotech/project_ws
+ros2 run web_video_server web_video_server > /dev/null 2>&1 &
+cd backend
+.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 끄기: Ctrl+C (서버 종료) 후
 pkill -f web_video_server
@@ -65,7 +52,7 @@ pkill -f web_video_server
 [3] 브라우저
 ----------------------------------------
 이 PC:      http://localhost:8000
-다른 기기:  http://SERVER_IP:8000 (SERVER_IP를 서버 PC의 실제 주소로 변경)
+다른 기기:  http://SERVER_IP:8000 (SERVER_IP를 Ubuntu 서버 PC의 실제 주소로 변경)
 
 
 참고

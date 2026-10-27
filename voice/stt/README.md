@@ -1,43 +1,25 @@
-# Mac 마이크 → Whisper 한국어 인식
+# 마이크 → Whisper 한국어 인식
 
 기본 입력 마이크로 5초를 녹음하고 한국어 인식 문장, 등록 표현 분류, 처리 시간을 출력한다.
 ROS2·Arduino·서버 연결 없이 로컬 CPU에서 실행한다. 기본 모델은 다국어 `base`다.
 
-## 최초 준비
+## 실행 전제
 
-TTS·STT·서버는 **Python 3.10**의 **`backend/.venv` 하나**를 공용으로 사용한다.
-환경 생성·설치는 사용자가 Mac 터미널에서 수행한다.
-Python 3.10 확인과 최초 환경 생성·통합 의존성 설치는 [프로젝트 README](../../README.md)의 Mac 개인 개발 환경 안내를 따른다.
+환경 생성·설치·활성화·의존성 확인은 [프로젝트 README의 개인 개발 환경](../../README.md#개인-개발-환경-python-310)을 따른다.
 음성 입출력의 공용 환경 사용법은 [../README.md](../README.md)를 참고한다.
-준비된 환경은 아래 명령으로 버전과 의존성 상태를 확인한다.
-
-```bash
-cd ~/robotech/project_ws
-backend/.venv/bin/python --version  # Python 3.10.x
-backend/.venv/bin/python -m pip check
-```
-
-설치가 실패하면 오류를 확인하며, 남아 있는 기존 환경을 삭제하거나 덮어쓰지 않는다.
+아래 명령은 의존성이 준비된 **개인 저장소의 프로젝트 루트**에서 실행한다.
+`backend/.venv/bin/python`으로 공용 환경을 직접 지정한다.
 
 ## 실행
 
 ```bash
-cd ~/robotech/project_ws
 backend/.venv/bin/python voice/stt/record_korean.py
-```
-
-또는 공용 환경을 활성화하고 실행한다.
-
-```bash
-cd ~/robotech/project_ws
-source backend/.venv/bin/activate
-python voice/stt/record_korean.py
 ```
 
 먼저 기본 입력 마이크 이름을 출력하고, Whisper 다국어 `base` 모델을 준비한다.
 최초 실행은 인터넷으로 모델을 받아 `voice/stt/.models/`에 저장한다.
 `5초 녹음 시작`이 출력되면 한국어로 말한다. 마이크 접근 요청이 나타나면 허용한다.
-접근을 거부했다면 macOS 시스템 설정 → 개인정보 보호 및 보안 → 마이크에서
+macOS에서 접근을 거부했다면 시스템 설정 → 개인정보 보호 및 보안 → 마이크에서
 실행에 사용하는 터미널 앱의 권한을 확인한다.
 녹음이 끝나면 한국어 인식 문장, 응답 분류, 시간들을 출력하고 종료한다.
 이 명령으로 음성이 재생되거나 로봇·서버 상태가 변경되지는 않는다.
@@ -49,7 +31,7 @@ backend/.venv/bin/python voice/stt/record_korean.py --list-devices
 backend/.venv/bin/python voice/stt/record_korean.py --device 1
 ```
 
-`1`은 예시다. 목록에서 Mac 내장 마이크의 실제 입력 장치 번호로 바꾼다.
+`1`은 예시다. 목록에서 사용할 마이크의 실제 입력 장치 번호로 바꾼다.
 
 `처리 시간(음성 인식)`은 녹음 완료 후의 Whisper 추론 시간이다.
 모델 다운로드·로딩과 녹음 시간은 별도로 출력한다.
@@ -91,8 +73,8 @@ Whisper에 파일 경로를 전달하지 않으므로 이 프로그램의 인식
 
 ## Python 함수로 재사용
 
-`record_korean.py`의 기존 터미널 실행은 그대로 사용할 수 있습니다.
-다른 Python 프로그램에서는 프로젝트 루트를 모듈 검색 경로에 두고 다음처럼 호출합니다.
+`record_korean.py`의 기존 터미널 실행은 그대로 사용할 수 있다.
+다른 Python 프로그램에서는 프로젝트 루트를 모듈 검색 경로에 두고 다음처럼 호출한다.
 
 ```python
 from voice.stt.record_korean import KoreanRecognizer
@@ -101,21 +83,20 @@ recognizer = KoreanRecognizer()  # 입력 장치 확인 및 모델 준비
 result = recognizer.recognize()  # 5초 녹음 → 인식·분류 → dict 반환
 ```
 
-준비한 객체는 여러 응답에 재사용할 수 있습니다. `device=...`로 입력 장치를 선택하며,
-호출은 순서대로 실행합니다. 정상 결과에는 `status`, `text`, `classification`,
-`record_seconds`, `transcribe_seconds`, `model_seconds`가 들어 있습니다.
-`model_seconds`는 객체를 처음 준비할 때 걸린 시간입니다. 기본적으로 진행 메시지는
-출력하지 않으며, 필요하면 생성할 때 `progress=print` 등 출력 함수를 지정합니다.
+준비한 객체는 여러 응답에 재사용할 수 있다. `device=...`로 입력 장치를 선택하며,
+호출은 순서대로 실행한다. 정상 결과에는 `status`, `text`, `classification`,
+`record_seconds`, `transcribe_seconds`, `model_seconds`가 들어 있다.
+`model_seconds`는 객체를 처음 준비할 때 걸린 시간이다. 기본적으로 진행 메시지는
+출력하지 않으며, 필요하면 생성할 때 `progress=print` 등 출력 함수를 지정한다.
 
-준비 중 실패는 예외로 전달됩니다. 녹음·인식 실패는 `RecognitionError`로 전달하며
-`stage`는 `recording` 또는 `recognition`입니다. 녹음 중 실패나 `Ctrl+C`가 발생하면
-입력을 중단합니다. 안내 MP3 재생과 실패 결과 반환까지 연결하는 방법은
-[음성 입출력 README](../README.md)의 안내 재생 후 응답 인식 절차를 참고합니다.
+준비 중 실패는 예외로 전달된다. 녹음·인식 실패는 `RecognitionError`로 전달하며
+`stage`는 `recording` 또는 `recognition`이다. 녹음 중 실패나 `Ctrl+C`가 발생하면
+입력을 중단한다. 안내 MP3 재생과 실패 결과 반환까지 연결하는 방법은
+[음성 입출력 README](../README.md)의 안내 재생 후 응답 인식 절차를 참고한다.
 
 ## 마이크·모델 설치 없이 로직 테스트
 
 ```bash
-cd ~/robotech/project_ws
 backend/.venv/bin/python -B -m unittest discover -s voice/stt -p 'test_*.py' -v
 ```
 
