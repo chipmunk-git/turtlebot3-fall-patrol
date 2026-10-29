@@ -68,7 +68,7 @@
 
       <section class="card robot-card">
         <div class="robot-row">
-          <div id="robot-hero" class="robot-hero state-idle">
+          <div id="robot-hero" class="robot-hero state-offline">
             <span class="robot-icon"><i></i></span>
             <div class="robot-text">
               <span class="eyebrow">Robot</span>
@@ -84,9 +84,8 @@
           </div>
         </div>
         <ol id="robot-steps" class="steps">
+          <li data-state="idle">대기</li>
           <li data-state="patrol">순찰</li>
-          <li data-state="suspect">의심</li>
-          <li data-state="approach">접근</li>
           <li data-state="observe">관찰</li>
           <li data-state="alert">알림</li>
         </ol>

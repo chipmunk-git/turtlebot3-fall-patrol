@@ -18,13 +18,14 @@ REFRESH_INTERVAL = 1.0
 
 # LCD lines are ASCII and limited to 16 characters each for a 1602 display.
 STATES = {
-    "idle": ("0,0,0", "IDLE|STANDBY", None),
+    "idle": ("0,0,255", "IDLE|STANDBY", None),
     "patrol": ("0,255,0", "MONITORING|PATROL ACTIVE", None),
-    "suspect": ("255,255,0", "PERSON DETECTED|CHECKING", None),
-    "approach": ("0,0,255", "APPROACHING|KEEP DISTANCE", None),
     "observe": ("255,255,0", "OBSERVING|PLEASE WAIT", "괜찮으신가요? 도움이 필요하시면 도와주세요라고 말씀해 주세요."),
     "alert": ("255,0,0", "FALL SUSPECTED|STAFF CHECK", "낙상이 의심됩니다. 관리자에게 확인을 요청합니다."),
 }
+
+# Keep older API clients usable without adding display states or changing data.
+STATE_ALIASES = {"suspect": "observe", "approach": "observe"}
 
 
 def publish_twice(publisher, message):
@@ -60,6 +61,7 @@ def main():
             try:
                 with urlopen(url, timeout=1.0) as res:
                     state = json.load(res)["state"]
+                state = STATE_ALIASES.get(state, state)
                 warned = False
                 now = time.monotonic()
                 if state != last_state or now - last_publish >= REFRESH_INTERVAL:

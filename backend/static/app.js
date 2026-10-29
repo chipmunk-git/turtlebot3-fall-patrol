@@ -26,14 +26,23 @@ const STATUS_LABELS = {
 
 const ROBOT_STATE_LABELS = {
   idle: "대기",
-  patrol: "순찰 중",
-  suspect: "의심 감지",
-  approach: "접근 중",
-  observe: "관찰 중",
+  patrol: "순찰",
+  observe: "관찰",
   alert: "알림",
 };
 
-const ROBOT_STEPS = ["patrol", "suspect", "approach", "observe", "alert"];
+const ROBOT_STEPS = ["idle", "patrol", "observe", "alert"];
+
+// Older API clients and stored logs keep their original values.
+const LEGACY_ROBOT_STATE_LABELS = { suspect: "의심 감지", approach: "접근 중" };
+
+function robotDisplayState(value) {
+  return value === "suspect" || value === "approach" ? "observe" : value;
+}
+
+function robotLogLabel(value) {
+  return ROBOT_STATE_LABELS[value] ?? LEGACY_ROBOT_STATE_LABELS[value] ?? value;
+}
 
 const SNAPSHOT_LABELS = { detected: "① 발견", observing: "② 관찰 시작", decision: "③ 판단" };
 
@@ -205,15 +214,16 @@ function renderRobot() {
   const robot = state.robot;
   if (!robot) return;
   const offline = state.serverOnline === false || robotIsStale();
-  $("#robot-hero").className = `robot-hero state-${offline ? "offline" : robot.state}`;
-  $("#robot-state").textContent = offline ? "연결 끊김" : ROBOT_STATE_LABELS[robot.state] ?? robot.state;
+  const displayState = robotDisplayState(robot.state);
+  $("#robot-hero").className = `robot-hero state-${offline ? "offline" : displayState}`;
+  $("#robot-state").textContent = offline ? "연결 끊김" : ROBOT_STATE_LABELS[displayState] ?? robot.state;
   $("#robot-sub").textContent = offline ? "마지막으로 받은 위치를 표시 중" : robotSubtitle(robot);
 
-  const current = offline ? -1 : ROBOT_STEPS.indexOf(robot.state);
+  const current = offline ? -1 : ROBOT_STEPS.indexOf(displayState);
   document.querySelectorAll("#robot-steps li").forEach((item, index) => {
     item.classList.toggle("done", index < current);
     item.classList.toggle("current", index === current);
-    item.classList.toggle("alert", index === current && robot.state === "alert");
+    item.classList.toggle("alert", index === current && displayState === "alert");
   });
 
   $("#robot-x").textContent = robot.x === null ? "-" : robot.x.toFixed(2);
@@ -223,17 +233,16 @@ function renderRobot() {
 }
 
 function robotSubtitle(robot) {
-  switch (robot.state) {
+  if (robot.state === "suspect" || robot.state === "approach") {
+    return `이전 상태 수신: ${LEGACY_ROBOT_STATE_LABELS[robot.state]}`;
+  }
+  switch (robotDisplayState(robot.state)) {
     case "patrol":
       return robot.current_waypoint === null ? "순찰 경로 이동 중" : `${robot.current_waypoint}번 지점으로 이동 중`;
-    case "suspect":
-      return "사람 감지, 무시 구역 확인 중";
-    case "approach":
-      return "대상에게 접근 중";
     case "observe":
       return "움직임 관찰 중";
     case "alert":
-      return "낙상 의심 알림 발생";
+      return "확인이 필요한 알림 발생";
     default:
       return "대기 중";
   }
@@ -675,7 +684,7 @@ function formatLog(entry) {
       return {
         tag: "ROBOT",
         tone: d.after === "alert" ? "alert" : "robot",
-        message: `로봇 ${ROBOT_STATE_LABELS[d.before]} → ${ROBOT_STATE_LABELS[d.after]}${at}`,
+        message: `로봇 ${robotLogLabel(d.before)} → ${robotLogLabel(d.after)}${at}`,
       };
     case "ignore_check":
       return d.ignored

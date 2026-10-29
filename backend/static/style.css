@@ -15,6 +15,10 @@
   --active: #a78bfa;
   --ok: #4fd1a1;
   --done: #626b7f;
+  --robot-idle: #5fb8ff;
+  --robot-patrol: #4fd1a1;
+  --robot-observe: #f5b94a;
+  --robot-alert: #ff6b81;
   --screen: #05070b;
   --map-free: #161b26;
   --map-wall: #8e9ab2;
@@ -385,12 +389,12 @@ h2 { font-size: 15px; letter-spacing: -0.015em; }
   opacity: 0;
   animation: ripple 2s var(--ease) infinite;
 }
-.state-idle, .state-offline { --state: var(--done); }
+.state-idle { --state: var(--robot-idle); }
+.state-offline { --state: var(--done); }
 .state-idle .robot-icon::after, .state-offline .robot-icon::after { animation: none; }
-.state-patrol { --state: var(--robot); }
-.state-suspect, .state-approach { --state: var(--uncertain); }
-.state-observe { --state: var(--active); }
-.state-alert { --state: var(--confirmed); }
+.state-patrol { --state: var(--robot-patrol); }
+.state-observe { --state: var(--robot-observe); }
+.state-alert { --state: var(--robot-alert); }
 @keyframes ripple {
   0% { transform: scale(1); opacity: 0.7; }
   100% { transform: scale(1.6); opacity: 0; }
@@ -411,7 +415,7 @@ h2 { font-size: 15px; letter-spacing: -0.015em; }
 
 .steps {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 6px;
   margin: 0;
   padding: 0;
@@ -427,8 +431,12 @@ h2 { font-size: 15px; letter-spacing: -0.015em; }
   transition: color 0.3s var(--ease), border-color 0.3s var(--ease);
 }
 .steps li.done { border-color: color-mix(in srgb, var(--robot) 40%, transparent); color: var(--muted); }
-.steps li.current { --glow: var(--robot); border-color: var(--glow); color: var(--text); font-weight: 600; }
-.steps li.current.alert { --glow: var(--confirmed); color: var(--confirmed); }
+.steps li.current { border-color: var(--glow); color: var(--text); font-weight: 600; }
+.steps li[data-state="idle"] { --glow: var(--robot-idle); }
+.steps li[data-state="patrol"] { --glow: var(--robot-patrol); }
+.steps li[data-state="observe"] { --glow: var(--robot-observe); }
+.steps li[data-state="alert"] { --glow: var(--robot-alert); }
+.steps li.current.alert { color: var(--robot-alert); }
 .steps li.current::before {
   content: "";
   position: absolute;

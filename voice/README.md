@@ -2,9 +2,11 @@
 
 TTS 작업 파일은 `voice/tts/`, STT 작업 파일은 `voice/stt/`에 둔다.
 
+Pi의 `whisper.cpp`와 ROS2 순찰을 연결하는 실행 방법은 [순찰·Pi 음성 연결 안내](../src/my_bot_fall/README.md)를 참고한다. `voice/stt/whisper_session.py`는 재생 → 녹음 → 인식 → 분류를 수행하고, `my_bot_fall`의 Pi 음성 노드가 결과를 순찰 노드에 전달한다. 아래 Python Whisper 개발용 실행 방식은 그대로 유지한다.
+
 개인 개발 환경의 생성·설치·활성화와 서버 실행은 [최상위 README의 개인 개발 환경](../README.md#개인-개발-환경-python-310)을 따른다.
 서버·Pi 작업 경로는 [최상위 README](../README.md#실행-환경과-작업-경로), Pi MP3 재생 시험 결과와 새 목표 경로의 검증 상태는 [TTS README](tts/README.md)를 참고한다.
-Pi USB 마이크는 ALSA 장치 인식까지만 확인했다. 실제 녹음·Whisper 한국어 인식·처리 시간·전체 연동은 아직 검증하지 않았으며, Whisper를 Pi와 원격 Ubuntu PC 중 어디서 실행할지는 미정이다.
+Pi에서 USB 마이크 녹음과 `whisper.cpp` 기반 한국어 음성 인식·모델별 처리 시간 비교 등 개별 시험을 진행했다. ROS2 순찰에서 Pi 음성을 실행하고 결과를 같은 서버 사건에 반영하는 전체 연동은 아직 실기 검증이 필요하다.
 
 ## 구성
 

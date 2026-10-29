@@ -1,0 +1,42 @@
+lying_detector:
+  ros__parameters:
+    image_topic: /image_raw/compressed
+    camera_info_topic: /camera_info
+    scan_topic: /scan
+    amcl_topic: /amcl_pose
+    weights: ""             # 비우면 설치된 패키지의 models/fall_pose_n.pt를 사용합니다.
+    person_conf: 0.45
+    target_keep_sec: 60.0
+    down_keep_sec: 300.0
+    fall_after_sec: 5.0            # 상체 근거가 있는 누움 + 저움직임
+    partial_fall_after_sec: 6.0  # 다리 등 부분 신체만 누운 경우 + 저움직임
+    too_close_dist: 0.40     # 0.4m 이내 + 화면 잘림 + 관절 부족일 때만 '너무 가까움'
+    partial_body_enabled: true
+    rot_every: 0
+    lidar_min_len: 1.0
+    lidar_max_len: 2.3
+    map_topic: /map
+    cam_height: 0.11
+    fy: 0.0
+    vfov: 48.8
+    tilt: -1.4
+    cam_offset_x: 0.07
+    min_dist: 0.30        # 가까워도 자세를 판단할 수 있으면 관찰 범위에 포함
+    max_dist: 3.0
+    vote_min: 10
+    vote_ratio: 0.6
+    rate: 5.0
+    show: false
+    save_dir: ~/fall_data/falls
+    inference_imgsz: 320
+    cpu_threads: 2
+    motion_threshold: 0.18
+    bbox_motion_threshold: 0.25 # 관절 부족 시 같은 인물 박스의 이동량 기준
+    motion_grace_sec: 1.5
+    valid_sample_sec: 0.35    # 3~5FPS에서 유효 관찰 프레임당 최대 0.35초 (영상 끊김 제외)
+    partial_hold_sec: 1.0      # 관절 2개/일시적 누락 보류 유지 시간(유효 시간에는 포함 안 함)
+    upper_evidence_sec: 2.0    # 상체 관절 일시 누락 시 상체 근거 유지 시간
+    low_top_height: 0.55      # 상체가 수평일 때만 애매한 0.46~0.55m 보완
+    low_horizontal_min_width: 0.80
+    observation_gap_sec: 3.0
+    camera_timeout_sec: 1.5

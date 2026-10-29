@@ -1,6 +1,6 @@
 # TurtleBot3 실내 순찰 및 낙상 의심 감지 시스템
 
-TurtleBot3 Waffle-Pi가 실내를 순찰하며 낙상 의심 상황을 발견하면 접근·관찰하고, 결과를 웹 대시보드에 기록하여 관리자가 확인하도록 하는 **5인 팀 프로젝트**입니다. ROS2 Humble을 기반으로 자율주행, YOLO 기반 인식, FastAPI 관제 및 Arduino 출력 장치를 연동합니다. 이 시스템의 감지 결과는 **의료적 진단이 아닌 ‘낙상 의심’ 판단**입니다.
+TurtleBot3 Waffle-Pi가 실내를 순찰하며 낙상 의심 상황을 발견하면 현 위치에서 정지·관찰하고, 결과를 웹 대시보드에 기록하여 관리자가 확인하도록 하는 **5인 팀 프로젝트**입니다. ROS2 Humble을 기반으로 자율주행, YOLO 기반 인식, FastAPI 관제 및 Arduino 출력 장치를 연동합니다. 이 시스템의 감지 결과는 **의료적 진단이 아닌 ‘낙상 의심’ 판단**입니다.
 
 현재는 기능별 개발과 통합을 진행 중입니다. **웹 서버의 로봇 상태에 따라 Arduino의 RGB LED·LCD를 변경하는 연동은 임시 개발 환경에서 시험**했으며, 실제 주행·AI 판단부터 모든 장치까지 연결한 최종 실기 시연과 음성 입출력은 별도 검증이 필요합니다.
 
@@ -8,7 +8,7 @@ TurtleBot3 Waffle-Pi가 실내를 순찰하며 낙상 의심 상황을 발견하
 
 | 영역 | 주요 기능 | 관련 위치 |
 |---|---|---|
-| 자율주행·인식 | 실내 순찰, 사람 검출 및 낙상 의심 판단(통합 진행 중) | 팀원별 주행·인식 기능 |
+| 자율주행·인식·Pi 음성 | 반복 순찰, 정지 관찰, 웹 사건과 음성 결과 연결(실기 통합 검증 필요) | [src/my_bot_fall/README.md](src/my_bot_fall/README.md) |
 | 관제 서버 | 로봇 상태, 이벤트·사진·활동 기록, 지도·대시보드 | `backend/` |
 | ROS2 ↔ 서버 | 로봇 상태·위치 전달, 이벤트 API 호출 | `src/fall_patrol_bridge/` |
 | ROS2 ↔ Arduino | USB 시리얼을 통한 LED·LCD·부저 제어 | `src/tb3_arduino_io/`, `arduino/` |
@@ -19,7 +19,7 @@ TurtleBot3 Waffle-Pi가 실내를 순찰하며 낙상 의심 상황을 발견하
 ```text
 [모의 시연] fake_robot.py ──HTTP──┐
                                ▼
-[실기 연동 대상] ROS2 주행·인식 → fall_patrol_bridge → FastAPI / SQLite
+[실기 통합 검증 대상] my_bot_fall/patrol ──HTTP──→ FastAPI / SQLite
                                                        │
                                                        │ GET /status
                                                        ▼
@@ -32,7 +32,7 @@ TurtleBot3 Waffle-Pi가 실내를 순찰하며 낙상 의심 상황을 발견하
                                              Arduino Uno → RGB LED·LCD
 ```
 
-`fall_patrol_bridge`는 **ROS2에서 서버로**, `status_to_arduino.py`는 **서버에서 ROS2 출력 장치로** 상태를 연결합니다. `fake_robot.py`는 실제 로봇·AI를 대신하는 모의 시연 프로그램입니다.
+`my_bot_fall/patrol`은 서버 상태·사건을 직접 전송합니다. `fall_patrol_bridge`는 별도의 ROS2→서버 연결용이며, 같은 서버에 두 상태 전송 프로그램이나 `fake_robot.py`를 동시에 실행하지 않습니다. `status_to_arduino.py`는 서버 상태를 ROS2 출력 장치로 전달합니다. Pi 음성 실행과 기존 사건 연결, STM32 규약 확인 범위는 [통합 실행 안내](src/my_bot_fall/README.md)를 참고합니다.
 
 ## 실행 환경과 작업 경로
 
@@ -62,6 +62,8 @@ project_ws/
 │   └── stt/                        # 녹음·Whisper·등록 표현 분류·테스트
 ├── docs/API.md                     # ROS2·서버 연동 API 안내
 ├── src/
+│   ├── my_bot_fall/                # 순찰·자세 판정·서버 직접 전송·Pi 음성 연결
+│   ├── fall_patrol_navigation/     # 단일 목표점 주행용 별도 실행 패키지
 │   ├── fall_patrol_bridge/         # ROS2 → 서버
 │   ├── tb3_arduino_io/             # ROS2 → Arduino 시리얼
 │   └── dev_scripts/
@@ -266,25 +268,41 @@ ros2 run fall_patrol_bridge status_bridge --ros-args -p server_url:=http://SERVE
 
 ## Arduino 출력 장치
 
-| 서버 상태 | LED | LCD (1행 / 2행) |
+| 로봇 표시 (서버 값) | LED | LCD (1행 / 2행) |
 |---|---|---|
-| `idle` | 꺼짐 | IDLE / STANDBY |
-| `patrol` | 초록 | MONITORING / PATROL ACTIVE |
-| `suspect` | 노랑 | PERSON DETECTED / CHECKING |
-| `approach` | 파랑 | APPROACHING / KEEP DISTANCE |
-| `observe` | 노랑 | OBSERVING / PLEASE WAIT |
-| `alert` | 빨강 | FALL SUSPECTED / STAFF CHECK |
+| 대기 (`idle`) | 파랑 | IDLE / STANDBY |
+| 순찰 (`patrol`) | 초록 | MONITORING / PATROL ACTIVE |
+| 관찰 (`observe`) | 노랑 | OBSERVING / PLEASE WAIT |
+| 알림 (`alert`) | 빨강 | FALL SUSPECTED / STAFF CHECK |
+
+대시보드의 로봇 상태와 LED는 위 네 가지로 표시합니다. 사건의 관찰 중·낙상 의심·판단 불가·오탐·확인됨·처리 완료는 별도의 처리 상태로 유지합니다. 로봇 연결 끊김은 대기와 구분해 회색으로 표시합니다.
+
+이전 프로그램의 `suspect`·`approach`는 화면과 출력 장치에서만 노란색 관찰로 묶고, 화면 부가 설명에는 수신한 옛 상태를 표시합니다. 과거 활동 기록은 원래 상태 명칭으로 표시하며 저장된 값을 바꾸지 않습니다. 이 표시 변환이 모의 프로그램의 접근 동작을 변경하지는 않습니다.
+
+LED 대기는 `0,0,255`이며, 프로그램 종료 시에는 기존대로 `0,0,0`으로 끕니다. 사건 배지·처리 버튼·색상과 기존 LCD 문구·부저 동작은 유지합니다.
 
 Arduino Uno에는 RGB LED(D5·D6·D9), 부저(D8), 1602 I2C LCD(SDA=A4, SCL=A5)를 연결합니다. `bridge`는 `/tb3/rgb_led`, `/tb3/lcd_text`, `/tb3/lcd_power`, `/tb3/buzzer`를 구독합니다.
 
 부저 펌웨어는 켜기 명령 후 **0.15초 울림 → 0.6초 쉼**을 반복하고 끄기 명령을 받으면 멈추도록 작성되어 있습니다. 단, **현재 `status_to_arduino.py`는 부저를 자동 제어하지 않습니다.** `observe`·`alert`의 음성 안내도 실제 재생이 아닌 터미널의 `[가상 스피커]` 출력입니다.
 
+### 표시 기능 모의 테스트
+
+프로젝트 루트에서 실행합니다. 대시보드 검사는 Node.js를 사용하며 추가 패키지 설치는 필요하지 않습니다. DOM을 모의한 함수 검사와 HTML·CSS 검사이며 실제 브라우저 화면·장비 검증은 별도입니다.
+
+```bash
+node backend/tests/test_robot_display.mjs
+backend/.venv/bin/python -B -m unittest discover -s src/dev_scripts -p 'test_status_to_arduino.py' -v
+```
+
+대시보드 8개와 LED 중계 7개를 검사합니다. 네 상태의 명칭·색상, 이전 상태·과거 로그 호환, 사건 상태 분리, 연결 끊김, 주기 재전송과 종료 시 끄기를 확인합니다. 실제 서버·ROS2·USB 장치는 사용하지 않습니다.
+
 ## 진행 상황과 다음 단계
 
 - **확인:** ROS2에서 Arduino의 LED·LCD·부저 제어, 부저 간헐음 시험, 웹 서버 상태에 따른 LED·LCD 연동 시험(임시 개발 환경).
-- **코드 제공·별도 통합 필요:** `fall_patrol_bridge`의 실기 연동, 실제 주행·낙상 인식 결과를 통한 서버 상태·이벤트 처리.
+- **통합 코드·모의 검증:** `my_bot_fall`의 순찰·자세 판정·서버 직접 전송에 Pi 음성 요청·결과를 연결했습니다. 기존 사건 메모에 결과를 덧붙이며 실제 ROS2·장비 통합은 별도 검증 대상입니다.
 - **음성 실기 확인:** 2026년 10월 26~27일 사용자 시험에서 Pi USB 스피커로 두 안내 MP3 재생에 성공했고, USB 마이크의 ALSA 장치 인식을 확인했습니다. 상세 결과는 [TTS 시험 기록](voice/tts/README.md)을 참고합니다.
-- **별도 검증 필요:** Arduino의 Raspberry Pi 장착·전원/USB 허브, 표시 상태 주기 재전송의 실기 동작, Pi 마이크 녹음·Whisper 인식·처리 시간·전체 음성 연동. Whisper의 Pi/원격 PC 실행 위치는 미정입니다.
+- **Pi 음성 개별 시험:** 사용자가 전달한 `whisper.cpp` 모델 비교·녹음 시험 자료를 활용하며, 이번 연결은 Pi의 `base-q8_0`을 사용합니다. 개별 인식 성공과 전체 연동 성공은 구분합니다.
+- **별도 검증 필요:** ROS2→Pi 음성 실행→같은 서버 사건 메모 반영, ROS2·서버 지도 정합성, 서버 PC의 실제 STM32 펌웨어·USB 규약 및 출력. STM32 펌웨어는 현재 자료에서 확인하지 못했습니다.
 
 최종 운영에서는 **Ubuntu Desktop 원격 PC와 TurtleBot3의 Raspberry Pi**를 사용합니다. 실제 장치가 분리되면 ROS2 노드의 실행 위치, 서버 주소 및 네트워크 설정을 해당 환경에 맞춰 확인해야 합니다.
 
