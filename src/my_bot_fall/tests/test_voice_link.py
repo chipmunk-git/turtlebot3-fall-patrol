@@ -90,6 +90,8 @@ class ControllerVoiceTests(unittest.TestCase):
         calls = []
         def http(method, path, data=None, *args):
             calls.append((method, path, data))
+            if path == '/control':
+                return {'drive': 'run'}
             if method == 'GET' and path == '/events/7':
                 return dict(event)
             if method == 'PATCH':

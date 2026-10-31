@@ -286,7 +286,7 @@ ros2 run fall_patrol_bridge status_bridge --ros-args -p server_url:=http://SERVE
 
 지도 변환 도구는 PNG 입력과 `--pretty` 옵션을 지원하며, `--pretty`에는 `backend/requirements.txt`의 Pillow가 필요합니다. 변환 명령은 `backend/maps/map.png`·`map.yaml`을 덮어쓰므로 입력·출력과 기존 지도 보관 여부를 확인한 뒤 실행합니다.
 
-주행 시작·정지 버튼은 `PUT /control`로 `run`·`stop`을 저장하고, `fake_robot.py`가 `GET /control`로 읽습니다. 버튼의 선택 표시는 서버에 저장된 명령이며 실행 완료 응답은 아닙니다. 정지는 모의 이동에 적용되고, 진행 중인 관찰·웹 처리 대기 절차를 취소하지 않습니다. **실제 로봇의 주행 제어는 아직 연결되지 않았습니다.**
+주행 시작·정지 버튼은 `PUT /control`로 `run`·`stop`을 저장하고, `fake_robot.py`와 실제 순찰 노드 `my_bot_fall/patrol`이 `GET /control`로 읽습니다. 버튼의 선택 표시는 서버에 저장된 명령이며 실행 완료 응답은 아닙니다. 실제 순찰은 지점 설정 후 시작 명령을 기다리며, 통신 복구·경고 해제 후에도 시작 버튼을 다시 눌러야 합니다. 정지는 진행 중인 관찰·음성 교환을 취소하지 않습니다. 실제 로봇의 실행 순서·재개 조건은 [순찰 안내](src/my_bot_fall/README.md)를 참고하며, 장비에서의 전체 연동은 별도 검증이 필요합니다.
 
 주행 명령의 최초 생성값은 `stop`이며 기존 명령은 서버 재시작 후에도 DB에 남습니다. 서버 시작 시 기존 사건 테이블을 유지하며 없는 `robot_control` 테이블을 추가합니다. DB를 삭제하거나 시험 기록을 다시 만들 필요는 없습니다. `scripts.seed`는 DB와 사진을 초기화하는 도구이므로 업데이트 적용용으로 실행하지 않습니다.
 

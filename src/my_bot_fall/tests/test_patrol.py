@@ -10,6 +10,7 @@ import threading
 import time
 import unittest
 import uuid
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 PKG = ROOT/'my_bot_fall'
@@ -71,12 +72,23 @@ class FakeBase:
                                      time.monotonic()-self.scan_time > self.scan_timeout)
     def control_loop(self):pass
     def stop_robot(self):self.stops+=1
+    def cancel_goal(self):
+        self.stop_robot();self.goal_pose=None;self.path_xy=[]
+    def goal_callback(self, msg):
+        self.stop_robot()
+        self.goal_pose=(msg.pose.position.x,msg.pose.position.y)
+        self.path_xy=[];self.need_plan=True
+    def publish_smooth(self, v, w, stationary=False):
+        if self.motion_blocked():self.stop_robot()
+        else:self.published.append((v,w))
 
 
 src=ast.parse((PKG/'fall_patrol.py').read_text())
 cls=next(n for n in src.body if isinstance(n,ast.ClassDef))
 ns=dict(AStarDriver=FakeBase,PatrolLogic=PatrolLogic,math=math,time=time,json=json,uuid=uuid,
-        Path=Path,os=os,Time=lambda:None,append_note=voice_module.append_note,voice_note=voice_module.voice_note)
+        Path=Path,os=os,Time=lambda:None,append_note=voice_module.append_note,voice_note=voice_module.voice_note,
+        PoseStamped=lambda:SimpleNamespace(header=SimpleNamespace(frame_id=''),pose=SimpleNamespace(
+            position=SimpleNamespace(x=0.,y=0.),orientation=SimpleNamespace(w=1.))))
 exec(compile(ast.Module(body=[cls],type_ignores=[]),'production-FallPatrol','exec'),ns)
 FallPatrol=ns['FallPatrol']
 
@@ -85,7 +97,9 @@ def fake_node():
     n=FallPatrol.__new__(FallPatrol)
     n.logic=PatrolLogic();n.logic.phase='patrol';n.command_lock=threading.RLock()
     n.voice_enabled=False
-    n.get_logger=lambda: type('Logger', (), {'warn': lambda *a: None, 'info': lambda *a: None})()
+    n.get_logger=lambda: type('Logger', (), {'warn': lambda *a, **kw: None, 'info': lambda *a, **kw: None})()
+    n.server_url='http://127.0.0.1:8000'
+    n.map_origin=[0.,0.];n.map_resolution=.05
     n.pose_seen=n.server_seen=n.last_frame_time=n.image_seen=time.monotonic()
     n.localization_seen=n.raw_rx_seen=n.scan_time=time.monotonic()
     n.localization_timeout=2.;n.location_source='TF';n.image_reject='ok'
@@ -94,6 +108,8 @@ def fake_node():
     n.base_blocked_test=False;n.stops=0;n.estop_active=False;n.estop_distance_threshold=.5
     n.estop_release_delay=.8;n.last_detect_time=0
     n.waypoints=[(0.,0.),(1.,0.),(1.,1.)];n.waypoint_index=0
+    n.waypoint_count=3;n.drive_enabled=True;n.control_initialized=True;n.control_epoch=0
+    n.path_xy=[];n.need_plan=False;n.published=[]
     n.wait_until=None;n.wait_seconds=2.;n.goal_pose=(1.,0.);n.current_pose=(0.,0.);n.current_yaw=0.
     n.goal_tolerance=.12;n.incident=None;n.image_jpeg=None
     n.journal=Path(tempfile.mkdtemp())/'incident.json'
@@ -120,7 +136,8 @@ class DriverTests(unittest.TestCase):
     def test_ack_does_not_override_safety(self):
         n=fake_node();n.logic.phase='ack_wait';n.base_blocked_test=True;n.control_loop()
         self.assertEqual(n.logic.phase,'ack_wait')
-        n.base_blocked_test=False;n.control_loop();self.assertEqual(n.logic.phase,'patrol')
+        n.base_blocked_test=False;n.control_loop();self.assertEqual(n.logic.phase,'ready')
+        self.assertFalse(n.drive_enabled)
 
     def test_ack_does_not_override_offline_web(self):
         n=fake_node();n.logic.phase='ack_wait';n.server_seen-=10;n.control_loop()
@@ -147,6 +164,7 @@ class WebTests(unittest.TestCase):
         calls=[]
         def http(method,path,data=None,*a):
             calls.append((method,path,data))
+            if path=='/control':return {'drive':'run'}
             if method=='GET' and path=='/events/7':return {'status':'acknowledged','acknowledged_at':'now'}
             return {'status':'ok'}
         n.http=http;n.post_incident=lambda incident:{'id':7}
@@ -162,32 +180,34 @@ class WebTests(unittest.TestCase):
                     'note_sent':True,'target':n.logic.target}
         original_goal=n.goal_pose
         n.http=lambda method,path,data=None,*a: (
+            {'drive':'run'} if path=='/control' else
             {'status':'false_alarm','acknowledged_at':None} if method=='GET' and path=='/events/7'
             else {'status':'ok'})
         n.web_cycle()
         self.assertEqual(n.logic.phase,'ack_wait')
         self.assertIn('오탐',n.logic.reason)
-        self.assertEqual(n.goal_pose,original_goal)
+        self.assertIsNone(n.goal_pose)
         n.base_blocked_test=True
         n.control_loop()
         self.assertEqual(n.logic.phase,'ack_wait')
         self.assertIsNotNone(n.incident)
         n.base_blocked_test=False
         n.control_loop()
-        self.assertEqual(n.logic.phase,'patrol')
-        self.assertEqual(n.goal_pose,original_goal)
+        self.assertEqual(n.logic.phase,'ready')
+        self.assertFalse(n.drive_enabled)
+        self.assertIsNone(n.goal_pose)
         self.assertIsNone(n.incident)
         self.assertEqual(json.loads(n.journal.read_text()),{})
         self.assertEqual(len(n.logic.ignored),1)
 
-    def test_pending_uncertain_or_unacknowledged_resolved_do_not_resume(self):
-        for status in ('uncertain','confirmed','pending','resolved'):
+    def test_pending_uncertain_or_confirmed_do_not_resume(self):
+        for status in ('uncertain','confirmed','pending'):
             with self.subTest(status=status):
                 n=fake_node();n.logic.phase='alert';n.logic.result='uncertain'
                 n.incident={'token':'t','event_id':7,'result':'uncertain',
                             'note_sent':True,'target':person(pose_frame='map')}
                 n.http=lambda method,path,data=None,*a: (
-                    {'status':status,'acknowledged_at':None}
+                    {'drive':'run'} if path=='/control' else {'status':status,'acknowledged_at':None}
                     if method=='GET' and path=='/events/7' else {'status':'ok'})
                 n.web_cycle()
                 self.assertEqual(n.logic.phase,'alert')

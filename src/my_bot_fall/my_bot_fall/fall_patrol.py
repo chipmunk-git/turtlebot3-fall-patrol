@@ -44,6 +44,11 @@ class FallPatrol(AStarDriver):
         self.server_seen = 0.0
         self.waypoints = []
         self.waypoint_index = 0
+        # A route never starts just because the last RViz waypoint was selected.
+        # Only an explicit, fresh web /control run command can enable driving.
+        self.drive_enabled = False
+        self.control_initialized = False
+        self.control_epoch = 0
         self.wait_until = None
         self.incident = None
         self.image_jpeg = None
@@ -105,7 +110,7 @@ class FallPatrol(AStarDriver):
         self.web_thread = threading.Thread(target=self.web_worker, daemon=True)
         self.web_thread.start()
         self.get_logger().info('my_bot_fall: test2 주행 코어 + 자세 모델 1개 + 기존 project_3 웹')
-        self.get_logger().info(f'RViz 2D Goal Pose로 {self.waypoint_count}개 지점 지정 → 반복 순찰')
+        self.get_logger().info(f'RViz 2D Goal Pose로 {self.waypoint_count}개 지점 지정 → 웹 주행 시작 버튼 대기')
 
     def setup_estop(self):
         # Override base YOLO worker: the pose node owns the one inference model.
@@ -310,7 +315,7 @@ class FallPatrol(AStarDriver):
         self.observation_image = self.image_jpeg
         self.observation_image_seen = self.image_seen
         if first:
-            self.get_logger().info('관찰 중 사진 확보: 판단 불가/낙상 경고에 첨부 예정')
+            self.get_logger().info('관찰 중 사진 확보: 확인 필요/낙상 경고에 첨부 예정')
 
     def pose_is_healthy(self):
         return (time.monotonic()-self.pose_seen <= self.pose_timeout
@@ -338,7 +343,7 @@ class FallPatrol(AStarDriver):
                 self.stop_robot()
 
     def motion_blocked(self):
-        return (self.logic.phase != 'patrol' or not self.location_ok() or not self.pose_is_healthy()
+        return (not self.drive_enabled or self.logic.phase != 'patrol' or not self.location_ok() or not self.pose_is_healthy()
                 or time.monotonic()-self.server_seen > 3.0 or super().motion_blocked())
 
     def goal_callback(self, msg):
@@ -363,8 +368,10 @@ class FallPatrol(AStarDriver):
             self.waypoints.append(point)
             self.get_logger().info(f'{len(self.waypoints)}/{self.waypoint_count} 지점: {point}')
             if len(self.waypoints) == self.waypoint_count:
-                self.logic.phase = 'patrol'
-                self.set_patrol_goal()
+                self.logic.phase = 'ready'
+                self.logic.reason = '순찰 준비 완료: 웹 주행 시작 버튼을 누르세요'
+                self.pause_drive(self.logic.reason, reset_control=True)
+                self.get_logger().info('목적지 설정 완료. 웹의 주행 시작 버튼을 누르기 전까지 정지 유지')
 
     def set_patrol_goal(self):
         msg = PoseStamped()
@@ -372,6 +379,66 @@ class FallPatrol(AStarDriver):
         msg.pose.position.x, msg.pose.position.y = self.waypoints[self.waypoint_index]
         msg.pose.orientation.w = 1.0
         super().goal_callback(msg)
+
+    def pause_drive(self, reason, reset_control=False):
+        """Stop motion without discarding waypoints, observation, or voice."""
+        with self.command_lock:
+            if self.drive_enabled and self.wait_until is not None and self.waypoints:
+                self.waypoint_index = (self.waypoint_index + 1) % len(self.waypoints)
+            self.drive_enabled = False
+            self.wait_until = None
+            self.cancel_goal() if self.goal_pose is not None else self.stop_robot()
+            if self.logic.phase == 'patrol':
+                self.logic.phase = 'ready'
+                self.logic.reason = reason
+            if reset_control:
+                self.control_initialized = False
+                # Invalidate a GET/PUT already in flight on the web thread.
+                self.control_epoch += 1
+
+    def apply_drive_command(self, drive):
+        """Apply an explicit web command. Return False for rejected early RUN.
+
+        No driving after restart, no old goal after STOP, and no unattended
+        restart after a cleared fall alert. Only the patrol node owns /cmd_vel.
+        """
+        with self.command_lock:
+            if drive == 'stop':
+                if self.drive_enabled or self.goal_pose is not None:
+                    self.get_logger().info('웹 정지 명령 수신: 로봇 정지, 기존 목적지 3곳 유지')
+                self.pause_drive('웹에서 주행 중지: 다시 시작 버튼 대기')
+                return True
+            if drive != 'run':
+                return False
+            if self.logic.phase in ('alert', 'ack_wait', 'error') or self.incident is not None:
+                return False
+            if self.drive_enabled:
+                return True
+            if (len(self.waypoints) != self.waypoint_count
+                    or self.logic.phase != 'ready' or self.incident is not None):
+                self.get_logger().warn('주행 시작 거부: 목적지 3곳 설정 및 경고 해제 후 다시 눌러주세요')
+                return False
+            # Keep the previously selected waypoint after a web STOP.
+            # set_patrol_goal() replans a fresh A* path from the robot's
+            # current AMCL position to that SAME destination.
+            self.wait_until = None
+            self.drive_enabled = True
+            self.logic.phase = 'patrol'
+            self.logic.reason = '웹에서 주행 시작/재개'
+            self.set_patrol_goal()
+            self.get_logger().info(
+                f'웹 주행 시작/재개: {self.waypoint_index + 1}번 목적지를 향해 현재 위치에서 경로 재계산')
+            return True
+
+    def publish_smooth(self, v, w, stationary=False):
+        # Base A* checks its own obstacle guard but does not know about web STOP.
+        # Guard the final velocity publisher too so no stale nonzero command
+        # can slip through after STOP has been applied.
+        with self.command_lock:
+            if not self.drive_enabled or self.logic.phase != 'patrol':
+                self.stop_robot()
+                return
+            super().publish_smooth(v, w, stationary=stationary)
 
     def save_incident(self):
         data = {k:v for k,v in (self.incident or {}).items() if k != 'image'}
@@ -419,10 +486,13 @@ class FallPatrol(AStarDriver):
     def control_loop(self):
         with self.command_lock:
             now = time.monotonic()
+            if self.drive_enabled and now-self.server_seen > 3.0:
+                self.pause_drive('웹 연결 중단: 복구 후 시작 버튼 대기', reset_control=True)
             self.confirm_on_observation_dropout(now)
             self.logic.tick(now, self.pose_is_healthy())
             self.sync_voice()
             if self.logic.phase == 'alert' and self.incident is None:
+                self.pause_drive('경고 발생: 웹 확인 및 시작 버튼 대기', reset_control=True)
                 self.make_incident()
             if self.logic.phase == 'ack_wait':
                 self.stop_robot()
@@ -437,11 +507,18 @@ class FallPatrol(AStarDriver):
                         self.logic.reason = '경고 해제 기록 실패'
                         return
                     self.logic.resume(now)
+                    self.pause_drive('경고 확인 완료: 웹 주행 시작 버튼 대기', reset_control=True)
                     self.clear_observation_image()
                     if not self.waypoints:
                         self.logic.phase = 'setup'
+                    elif not self.drive_enabled:
+                        self.logic.phase = 'ready'
+                        self.logic.reason = '경고 확인 완료: 웹 주행 시작 버튼 대기'
                 return
-            if self.logic.phase != 'patrol':
+            if self.logic.phase == 'patrol' and not self.drive_enabled:
+                self.logic.phase = 'ready'
+                self.logic.reason = '웹에서 주행 중지: 다시 시작 버튼 대기'
+            if self.logic.phase != 'patrol' or not self.drive_enabled:
                 self.stop_robot()
                 return
             if self.wait_until is not None:
@@ -455,9 +532,10 @@ class FallPatrol(AStarDriver):
             before = self.goal_pose
             arrived = (before is not None and self.current_pose is not None and
                        math.dist(before, self.current_pose) < self.goal_tolerance)
-        super().control_loop()
-        with self.command_lock:
-            if self.logic.phase == 'patrol' and before is not None and self.goal_pose is None:
+            # Keep planning, velocity publishing and web STOP serialized.
+            # Otherwise a concurrent STOP can be followed by an old velocity.
+            super().control_loop()
+            if self.logic.phase == 'patrol' and self.drive_enabled and before is not None and self.goal_pose is None:
                 if arrived:
                     self.wait_until = now+self.wait_seconds
                 else:
@@ -509,8 +587,12 @@ class FallPatrol(AStarDriver):
         request = urllib.request.Request(self.server_url+path, data=body, method=method)
         if body is not None:
             request.add_header('Content-Type', content_type)
-        with urllib.request.urlopen(request, timeout=1.0) as response:
-            return json.loads(response.read())
+        try:
+            with urllib.request.urlopen(request, timeout=1.0) as response:
+                return json.loads(response.read())
+        except (OSError, ValueError):
+            self.pause_drive('웹 연결 오류: 복구 후 시작 버튼 대기', reset_control=True)
+            raise
 
     def post_incident(self, incident):
         boundary = uuid.uuid4().hex
@@ -525,8 +607,40 @@ class FallPatrol(AStarDriver):
         body += f'--{boundary}--\r\n'.encode()
         return self.http('POST', '/events', body, 'multipart/form-data; boundary='+boundary)
 
+    def poll_drive_control(self):
+        """Control faults block motion, but must not block event/voice reporting."""
+        try:
+            with self.command_lock:
+                if self.drive_enabled and time.monotonic()-self.server_seen > 3.0:
+                    self.pause_drive('웹 연결 중단: 복구 후 시작 버튼 대기', reset_control=True)
+                epoch = self.control_epoch
+                initialized = self.control_initialized
+            if not initialized:
+                # Consume neither a saved RUN nor a click made before recovery.
+                reset = self.http('PUT', '/control', {'drive': 'stop'})
+                if not isinstance(reset, dict) or reset.get('drive') != 'stop':
+                    raise ValueError('주행 정지 초기화 응답 불일치')
+                with self.command_lock:
+                    if epoch == self.control_epoch:
+                        self.control_initialized = True
+                return
+            control = self.http('GET', '/control')
+            if not isinstance(control, dict) or control.get('drive') not in ('run', 'stop'):
+                raise ValueError('잘못된 주행 명령 응답')
+            with self.command_lock:
+                if epoch != self.control_epoch or not self.control_initialized:
+                    return
+                if self.drive_enabled and time.monotonic()-self.server_seen > 3.0:
+                    self.pause_drive('웹 연결 중단: 복구 후 시작 버튼 대기', reset_control=True)
+                elif not self.apply_drive_command(control['drive']):
+                    self.pause_drive('주행 시작 거부: 준비 후 다시 시작하세요', reset_control=True)
+        except Exception as error:
+            self.pause_drive('주행 명령 오류: 복구 후 시작 버튼 대기', reset_control=True)
+            self.get_logger().warn(f'주행 명령 대기: {error}', throttle_duration_sec=5.0)
+
     def web_cycle(self):
         self.http('GET', '/health')
+        self.poll_drive_control()
         with self.command_lock:
             incident = self.incident
             pose = self.current_pose if self.location_ok() else None
@@ -562,7 +676,7 @@ class FallPatrol(AStarDriver):
                             '사용자가 사진과 현장을 확인해 주세요.')
                 else:
                     note = ('연속 누움·저움직임 기반 낙상 의심. 실제 사고 확정 아님.'
-                            if incident['result'] == 'confirmed' else '상태 확인 필요: 누운 자세 의심을 감지했으나 15초 안에 낙상 여부를 확정하지 못했습니다. 관찰 중 사진을 확인해 주세요. (판단 불가 알림)')
+                            if incident['result'] == 'confirmed' else '상태 확인 필요: 누운 자세 의심을 감지했으나 15초 안에 낙상 여부를 확정하지 못했습니다. 관찰 중 사진을 확인해 주세요. (확인 필요 알림)')
                 self.append_event_note(incident['event_id'], '[robot:' + incident['token'] + ']', note)
                 with self.command_lock:
                     incident['note_sent'] = True
@@ -577,12 +691,11 @@ class FallPatrol(AStarDriver):
                     self.save_incident()
             event = self.http('GET', f"/events/{incident['event_id']}")
             event_status = event.get('status')
-            # An explicit '오탐' action is a human dismissal. Unlike the old
-            # implementation, it must release the alert even if the web API
-            # does not attach an acknowledged_at timestamp to false_alarm.
-            # 'resolved' still requires prior acknowledgment, as before.
-            manually_cleared = (event_status == 'false_alarm' or
-                                (event_status in ('acknowledged', 'resolved') and
+            # New GUI: '조치 완료' (resolved) and '오탐' (false_alarm) are
+            # terminal user actions; there is no separate '확인' step.
+            # Legacy 'acknowledged' also remains supported for old events.
+            manually_cleared = (event_status in ('resolved', 'false_alarm') or
+                                (event_status == 'acknowledged' and
                                  bool(event.get('acknowledged_at'))))
             if manually_cleared:
                 with self.command_lock:
@@ -603,6 +716,7 @@ class FallPatrol(AStarDriver):
             try:
                 self.web_cycle()
             except Exception as error:
+                self.pause_drive('웹 전송 오류: 복구 후 시작 버튼 대기', reset_control=True)
                 self.get_logger().warn(f'웹 연결/전송 대기: {error}', throttle_duration_sec=5.0)
             self.worker_stop.wait(0.5)
 
