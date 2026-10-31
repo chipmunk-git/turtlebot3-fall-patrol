@@ -13,4 +13,3 @@ DATABASE_URL = f"sqlite:///{(DATA_DIR / 'app.db').as_posix()}"
 
 IGNORE_RADIUS_M = 1.0
 IGNORE_TTL = timedelta(minutes=10)
-FALSE_ALARM_TTL = timedelta(minutes=3)

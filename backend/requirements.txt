@@ -3,3 +3,4 @@ uvicorn[standard]==0.54.0
 sqlalchemy==2.0.55
 python-multipart==0.0.32
 pyyaml==6.0.3
+pillow==12.3.0

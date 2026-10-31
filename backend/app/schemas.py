@@ -3,7 +3,7 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, PlainSerializer
 
-from app.models import EventStatus, RobotState, SnapshotKind
+from app.models import DriveCommand, EventStatus, RobotState, SnapshotKind
 
 
 def to_utc_iso(value: datetime) -> str:
@@ -68,6 +68,7 @@ class MapInfo(BaseModel):
     resolution: float
     origin_x: float
     origin_y: float
+    origin_yaw: float = 0.0
 
 
 class RobotStatusRead(BaseModel):
@@ -87,3 +88,14 @@ class RobotStatusUpdate(BaseModel):
     y: float | None = None
     yaw: float | None = None
     current_waypoint: int | None = None
+
+
+class RobotControlRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    drive: DriveCommand
+    updated_at: UtcDatetime
+
+
+class RobotControlUpdate(BaseModel):
+    drive: DriveCommand

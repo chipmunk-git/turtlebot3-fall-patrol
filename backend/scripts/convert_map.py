@@ -1,12 +1,19 @@
 import argparse
+import math
 from pathlib import Path
 
 import yaml
 
 from scripts.map_cleaner import clean_map, crop_to_content
-from scripts.png_utils import encode_png
+from scripts.png_utils import decode_gray_png, encode_png
 
 MAP_DIR = Path(__file__).resolve().parent.parent / "maps"
+
+
+def shifted_origin(origin: list[float], dx: float, dy: float) -> list[float]:
+    x, y, yaw = origin
+    cos, sin = math.cos(yaw), math.sin(yaw)
+    return [round(x + dx * cos - dy * sin, 4), round(y + dx * sin + dy * cos, 4), yaw]
 
 
 def read_pgm(path: Path) -> tuple[int, int, bytes]:
@@ -37,18 +44,32 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="ROS map.yaml + pgm을 대시보드용 maps/map.png, map.yaml로 변환")
     parser.add_argument("yaml_path", type=Path, help="SLAM으로 저장한 map.yaml 경로")
     parser.add_argument("--clean", action="store_true", help="방 밖 노이즈 제거, 벽 틈 메우기, 벽 두께 정리")
+    parser.add_argument("--pretty", action="store_true", help="--clean 후 벽을 직선으로 펴고 고해상도로 다시 그림")
     args = parser.parse_args()
 
     meta = yaml.safe_load(args.yaml_path.read_text(encoding="utf-8"))
-    width, height, pixels = read_pgm(args.yaml_path.parent / meta["image"])
-    if args.clean:
+    image_path = args.yaml_path.parent / meta["image"]
+    if image_path.suffix.lower() == ".png":
+        width, height, pixels = decode_gray_png(image_path.read_bytes())
+    else:
+        width, height, pixels = read_pgm(image_path)
+    if args.clean or args.pretty:
         pixels = clean_map(width, height, pixels)
         width, height, pixels, left, bottom = crop_to_content(width, height, pixels)
-        meta["origin"] = [
-            round(meta["origin"][0] + left * meta["resolution"], 4),
-            round(meta["origin"][1] + bottom * meta["resolution"], 4),
-            meta["origin"][2],
-        ]
+        meta["origin"] = shifted_origin(
+            meta["origin"], left * meta["resolution"], bottom * meta["resolution"]
+        )
+    if args.pretty:
+        from scripts.map_vectorizer import prettify_map
+
+        new_width, new_height, pixels, corner, yaw = prettify_map(width, height, pixels)
+        resolution = meta["resolution"]
+        meta["origin"] = shifted_origin(
+            meta["origin"], corner[0] * resolution, (height - corner[1]) * resolution
+        )
+        meta["origin"][2] = round(meta["origin"][2] + yaw, 6)
+        meta["resolution"] = resolution / 8
+        width, height = new_width, new_height
 
     MAP_DIR.mkdir(exist_ok=True)
     (MAP_DIR / "map.png").write_bytes(encode_png(width, height, pixels, 1))

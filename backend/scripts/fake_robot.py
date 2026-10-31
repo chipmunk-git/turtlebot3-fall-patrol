@@ -14,8 +14,13 @@ from scripts.png_utils import decode_gray_png, make_snapshot
 
 TICK = 0.2
 RECHECK_COOLDOWN = 15.0
-RESULTS = ["confirmed", "uncertain", "false_alarm"]
-RESULT_WEIGHTS = [0.5, 0.25, 0.25]
+# 실제 로봇(src/my_bot_fall/my_bot_fall/patrol_logic.py)과 같은 세 가지 결말.
+# 오탐(false_alarm)은 로봇이 정하지 않고, 사람이 웹에서 사진을 보고 누른다.
+SCENARIOS = ["confirmed", "normal", "uncertain"]
+OBSERVATION_TIMEOUT = 15.0  # 이 시간 안에 낙상을 확정하지 못하면 확인 필요
+NORMAL_CLEAR_SECONDS = 2.0  # 정상 자세가 이만큼 이어지면 이벤트 없이 순찰 재개
+WEB_DONE = ("acknowledged", "resolved", "false_alarm")
+LABELS = {"confirmed": "낙상 의심", "uncertain": "확인 필요"}
 
 
 class MapView:
@@ -23,11 +28,14 @@ class MapView:
         self.resolution = info["resolution"]
         self.origin_x = info["origin_x"]
         self.origin_y = info["origin_y"]
+        self.cos = math.cos(info.get("origin_yaw", 0.0))
+        self.sin = math.sin(info.get("origin_yaw", 0.0))
         self.width, self.height, self.pixels = decode_gray_png(image)
 
     def is_free(self, x: float, y: float) -> bool:
-        col = int((x - self.origin_x) / self.resolution)
-        row = self.height - 1 - int((y - self.origin_y) / self.resolution)
+        dx, dy = x - self.origin_x, y - self.origin_y
+        col = int((dx * self.cos + dy * self.sin) / self.resolution)
+        row = self.height - 1 - int((dy * self.cos - dx * self.sin) / self.resolution)
         return 0 <= col < self.width and 0 <= row < self.height and self.pixels[row * self.width + col] > 250
 
     def line_of_sight(self, start: Point, end: Point) -> bool:
@@ -40,13 +48,23 @@ class MapView:
 
 class FakeRobot:
     def __init__(
-        self, base_url: str, patrol: Patrol, speed: float, observe_seconds: float, rng: random.Random
+        self,
+        base_url: str,
+        patrol: Patrol,
+        speed: float,
+        observe_seconds: float,
+        rng: random.Random,
+        random_results: bool = False,
+        ack_wait: float = 30.0,
     ):
         self.base_url = base_url.rstrip("/")
         self.patrol = patrol
         self.speed = speed
         self.observe_seconds = observe_seconds
         self.rng = rng
+        self.random_results = random_results
+        self.ack_wait = ack_wait
+        self.scenario_index = 0
         self.x, self.y = patrol.waypoints[0]
         self.yaw = 0.0
         self.waypoint = 0
@@ -112,8 +130,33 @@ class FakeRobot:
             self.put_status(state)
             time.sleep(TICK)
 
+    def wait_for_run(self) -> None:
+        """명시적인 run 명령을 읽을 때까지 이동하지 않고 재조회한다."""
+        waiting_for = None
+        while True:
+            try:
+                control = self.request("GET", "/control")
+            except (OSError, ValueError):
+                control = None
+            drive = control.get("drive") if isinstance(control, dict) else None
+            if drive == "run":
+                if waiting_for is not None:
+                    print("[주행] 웹에서 주행 시작: 이어서 이동")
+                return
+            reason = "stop" if drive == "stop" else "unavailable"
+            if waiting_for != reason:
+                print("[주행] 웹에서 정지: 시작 명령을 기다림" if reason == "stop" else
+                      "[주행] 주행 명령 조회 실패 또는 응답 오류: 이동하지 않고 재조회")
+                waiting_for = reason
+            try:
+                self.put_status("idle")
+            except (OSError, ValueError):
+                pass  # 상태 보고 실패가 이동을 허용하지는 않는다.
+            time.sleep(0.5)
+
     def drive_to(self, target: Point, state: str, stop_distance: float = 0.0) -> None:
         while True:
+            self.wait_for_run()
             dx, dy = target[0] - self.x, target[1] - self.y
             distance = math.hypot(dx, dy)
             if distance <= stop_distance + 1e-6:
@@ -139,12 +182,19 @@ class FakeRobot:
             self.last_checked[spot] = now
             self.handle_person(spot)
 
+    def next_scenario(self) -> str:
+        if self.random_results:
+            return self.rng.choice(SCENARIOS)
+        scenario = SCENARIOS[self.scenario_index % len(SCENARIOS)]
+        self.scenario_index += 1
+        return scenario
+
     def handle_person(self, spot: Point) -> None:
-        x = round(spot[0] + self.rng.uniform(-0.3, 0.3), 2)
-        y = round(spot[1] + self.rng.uniform(-0.3, 0.3), 2)
+        x = round(spot[0] + self.rng.uniform(-0.15, 0.15), 2)
+        y = round(spot[1] + self.rng.uniform(-0.15, 0.15), 2)
         seed = self.rng.randrange(1 << 30)
         detected_snapshot = make_snapshot(seed, "detected")
-        print(f"[감지] 사람 발견 ({x}, {y}), 사진 ① 보관")
+        print(f"[감지] 누운 자세 의심 ({x}, {y}), 사진 ① 보관")
         self.hold("suspect", 1.0)
 
         query = urllib.parse.urlencode({"x": x, "y": y})
@@ -153,28 +203,47 @@ class FakeRobot:
             print(f"  → 무시 구역 (이벤트 {check['event_id']}), 사진 ① 버리고 순찰 계속")
             return
 
-        print("  → 접근")
+        print("  → 접근 후 정지 관찰")
         self.drive_to(spot, "approach", self.patrol.approach_distance)
+        scenario = self.next_scenario()
+        if scenario == "normal":
+            self.hold("observe", NORMAL_CLEAR_SECONDS + 1.0)
+            print(f"  → 정상 자세가 {NORMAL_CLEAR_SECONDS:.0f}초 이어짐: 이벤트 없이 순찰 재개")
+            return
+        if scenario == "confirmed":
+            self.hold("observe", self.observe_seconds)
+            print(f"  → 누운 자세·저움직임 {self.observe_seconds:.0f}초 연속 확인")
+            confidence = self.rng.uniform(0.75, 0.95)
+        else:
+            self.hold("observe", OBSERVATION_TIMEOUT)
+            print(f"  → {OBSERVATION_TIMEOUT:.0f}초 동안 낙상 여부를 확정하지 못함")
+            confidence = self.rng.uniform(0.4, 0.65)
+
         event = self.post_multipart(
             "/events",
-            {"x": x, "y": y, "confidence": round(self.rng.uniform(0.5, 0.95), 2), "status": "observing"},
+            {"x": x, "y": y, "confidence": round(confidence, 2), "status": scenario},
             {"detected_snapshot": detected_snapshot, "observing_snapshot": make_snapshot(seed, "observing")},
         )
         if event is None:
             return
-        print(f"  → 이벤트 {event['id']} 생성 (사진 ①②), {self.observe_seconds:.0f}초 관찰")
-        self.hold("observe", self.observe_seconds)
-
-        result = self.rng.choices(RESULTS, RESULT_WEIGHTS)[0]
         self.post_multipart(
             f"/events/{event['id']}/snapshots",
             {"kind": "decision"},
             {"snapshot": make_snapshot(seed, "decision")},
         )
-        self.send_json("PATCH", f"/events/{event['id']}", {"status": result})
-        print(f"  → 결과: {result} (사진 ③)")
-        if result == "confirmed":
-            self.hold("alert", 2.0)
+        print(f"  → 이벤트 {event['id']} 생성: {LABELS[scenario]} (사진 ①②③), 웹 확인 대기")
+        self.wait_for_web(event["id"])
+
+    def wait_for_web(self, event_id: int) -> None:
+        """실제 로봇처럼 웹에서 확인·처리완료·오탐을 누를 때까지 알림 상태로 멈춘다."""
+        deadline = time.monotonic() + self.ack_wait
+        while self.ack_wait <= 0 or time.monotonic() < deadline:
+            event = self.request("GET", f"/events/{event_id}")
+            if event and event["status"] in WEB_DONE:
+                print(f"  → 웹에서 {event['status']} 처리: 순찰 재개")
+                return
+            self.hold("alert", 1.0)
+        print(f"  → {self.ack_wait:.0f}초 동안 웹 처리 없음: 시연용으로 순찰 재개")
 
     def run(self) -> None:
         print(f"fake robot → {self.base_url} (Ctrl+C로 종료)")
@@ -189,10 +258,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="로봇 대신 서버 API를 호출하는 가짜 로봇")
     parser.add_argument("--url", default="http://127.0.0.1:8000")
     parser.add_argument("--speed", type=float, default=0.3, help="이동 속도 (m/s)")
-    parser.add_argument("--observe", type=float, default=5.0, help="관찰 시간 (초)")
+    parser.add_argument("--observe", type=float, default=5.0, help="낙상 의심으로 확정하기까지 관찰 시간 (초)")
+    parser.add_argument("--random", action="store_true", help="결말을 차례대로가 아니라 무작위로 고름")
+    parser.add_argument("--ack-wait", type=float, default=30.0, help="알림 뒤 웹 처리를 기다리는 시간 (초, 0이면 무한)")
     args = parser.parse_args()
 
-    robot = FakeRobot(args.url, load_patrol(), args.speed, args.observe, random.Random())
+    robot = FakeRobot(
+        args.url, load_patrol(), args.speed, args.observe, random.Random(), args.random, args.ack_wait
+    )
     try:
         robot.run()
     except KeyboardInterrupt:

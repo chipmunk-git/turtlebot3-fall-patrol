@@ -1,11 +1,11 @@
 import math
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import and_, or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.activity import record
-from app.config import FALSE_ALARM_TTL, IGNORE_RADIUS_M, IGNORE_TTL
+from app.config import IGNORE_RADIUS_M, IGNORE_TTL
 from app.database import get_db
 from app.models import Event, EventStatus, utcnow
 from app.schemas import IgnoreCheck
@@ -28,13 +28,9 @@ def check(x: float, y: float, db: Session = Depends(get_db)) -> IgnoreCheck:
         .where(
             Event.x.is_not(None),
             Event.y.is_not(None),
-            or_(
-                and_(Event.status.in_(ACTIVE_STATUSES), Event.created_at >= now - IGNORE_TTL),
-                and_(
-                    Event.status == EventStatus.FALSE_ALARM,
-                    Event.created_at >= now - FALSE_ALARM_TTL,
-                ),
-            ),
+            # 오탐은 사람이 확인한 결과라 무시하지 않고 다시 순찰 대상으로 둔다
+            Event.status.in_(ACTIVE_STATUSES),
+            Event.created_at >= now - IGNORE_TTL,
         )
         .order_by(Event.created_at.desc())
     )

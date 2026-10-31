@@ -1,14 +1,14 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app import models
 from app.config import MAP_DIR, SNAPSHOT_DIR, STATIC_DIR
 from app.database import engine
-from app.routers import events, ignore_zones, logs, map, status
+from app.routers import control, events, ignore_zones, logs, map, status
 
 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 MAP_DIR.mkdir(parents=True, exist_ok=True)
@@ -29,11 +29,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def revalidate_dashboard(request: Request, call_next) -> Response:
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.endswith((".html", ".js", ".css")):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 app.include_router(events.router)
 app.include_router(ignore_zones.router)
 app.include_router(status.router)
 app.include_router(map.router)
 app.include_router(logs.router)
+app.include_router(control.router)
 
 
 @app.get("/health", tags=["health"])

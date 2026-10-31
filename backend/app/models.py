@@ -21,6 +21,11 @@ class EventStatus(str, enum.Enum):
     RESOLVED = "resolved"
 
 
+class DriveCommand(str, enum.Enum):
+    RUN = "run"
+    STOP = "stop"
+
+
 class RobotState(str, enum.Enum):
     IDLE = "idle"
     PATROL = "patrol"
@@ -101,6 +106,16 @@ class RobotStatus(Base):
     y: Mapped[float | None]
     yaw: Mapped[float | None]
     current_waypoint: Mapped[int | None]
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+
+
+class RobotControl(Base):
+    """웹에서 로봇에게 내리는 주행 명령. 로봇이 GET /control로 읽어 간다 (한 줄만 쓴다)."""
+
+    __tablename__ = "robot_control"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    drive: Mapped[DriveCommand] = mapped_column(enum_column(DriveCommand), default=DriveCommand.STOP)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 
 

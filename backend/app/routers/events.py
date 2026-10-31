@@ -21,6 +21,8 @@ def apply_status(event: Event, status: EventStatus) -> None:
         event.acknowledged_at = utcnow()
     if status == EventStatus.RESOLVED and event.resolved_at is None:
         event.resolved_at = utcnow()
+        if event.acknowledged_at is None:
+            event.acknowledged_at = event.resolved_at
 
 
 def has_file(upload: UploadFile | None) -> bool:
