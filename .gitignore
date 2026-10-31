@@ -284,3 +284,16 @@ GitHub.sublime-settings
 
 # macOS Finder metadata
 .DS_Store
+
+# STM32CubeIDE shared project configuration
+!/mcu/stm32/tb3_nucleo_io/.project
+!/mcu/stm32/tb3_nucleo_io/.cproject
+
+# STM32 build outputs and local IDE/debug state
+/mcu/stm32/**/Debug/
+/mcu/stm32/**/Release/
+/mcu/stm32/**/*.launch
+/mcu/stm32/**/.metadata/
+/mcu/stm32/**/.settings/com.st.stm32cube.ide.mcu.sfrview.prefs
+/mcu/stm32/**/.settings/stm32cubeide.project.prefs
+/mcu/stm32/**/.settings/language.settings.xml

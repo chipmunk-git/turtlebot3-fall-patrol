@@ -11,7 +11,7 @@ TurtleBot3 Waffle-Pi가 실내를 순찰하며 낙상 의심 상황을 발견하
 | 자율주행·인식·Pi 음성 | 반복 순찰, 정지 관찰, 웹 사건과 음성 결과 연결(실기 통합 검증 필요) | [src/my_bot_fall/README.md](src/my_bot_fall/README.md) |
 | 관제 서버 | 로봇 상태, 이벤트·사진·활동 기록, 지도·대시보드 | `backend/` |
 | ROS2 ↔ 서버 | 로봇 상태·위치 전달, 이벤트 API 호출 | `src/fall_patrol_bridge/` |
-| ROS2 ↔ Arduino | USB 시리얼을 통한 LED·LCD·부저 제어 | `src/tb3_arduino_io/`, `arduino/` |
+| ROS2 ↔ MCU | USB 시리얼을 통한 LED·LCD·부저 제어 | `src/tb3_arduino_io/`, [mcu/README.md](mcu/README.md) |
 | 서버 상태 → 출력 장치 | 서버 상태를 ROS2의 RGB LED·LCD 명령으로 변환 | `src/dev_scripts/status_to_arduino.py` |
 
 ### 상태 연동 흐름
@@ -51,7 +51,9 @@ Pi에는 필요한 프로그램·파일만 배치할 수 있으며, 저장소 �
 
 ```text
 project_ws/
-├── arduino/tb3_io/tb3_io.ino       # Arduino 펌웨어
+├── mcu/                            # 출력 장치 펌웨어·핀·통신 안내
+│   ├── arduino/tb3_io/             # Arduino Uno 스케치
+│   └── stm32/tb3_nucleo_io/        # STM32 NUCLEO-F103RB 프로젝트
 ├── backend/                        # FastAPI 서버·웹 화면·모의 로봇; 공용 .venv 위치
 ├── voice/                          # 음성 입출력 코드·문서·안내 MP3
 │   ├── README.md
@@ -154,7 +156,7 @@ python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
 
 아래는 **개발 PC 한 대에서 웹 서버·ROS2·Arduino를 연결하는 통합 시험** 기준입니다. 실제 로봇에서는 Arduino를 Raspberry Pi에 연결하고 브리지를 그쪽에서 실행할 수 있습니다. 이때 웹 서버와 ROS2 노드의 실행 위치 및 주소는 최종 환경에 맞춰 조정합니다.
 
-**실행 전 확인:** Arduino Uno에는 `arduino/tb3_io/tb3_io.ino` 펌웨어를 업로드하고 RGB LED·LCD를 연결해야 합니다. USB로 연결한 Arduino가 Linux에서 `/dev/ttyACM0` 등으로 인식되어야 합니다. WSL2를 사용한다면 Windows에서 USB 장치를 WSL로 전달한 후 확인하며, Ubuntu Desktop·Raspberry Pi에서는 실제 USB 연결 상태를 확인합니다. `bridge.py` 실행에는 Python의 `serial` 모듈(pyserial)도 필요합니다.
+**실행 전 확인:** Arduino Uno에는 `mcu/arduino/tb3_io/tb3_io.ino` 펌웨어를 업로드하고 RGB LED·LCD를 연결해야 합니다. USB로 연결한 Arduino가 Linux에서 `/dev/ttyACM0` 등으로 인식되어야 합니다. WSL2를 사용한다면 Windows에서 USB 장치를 WSL로 전달한 후 확인하며, Ubuntu Desktop·Raspberry Pi에서는 실제 USB 연결 상태를 확인합니다. `bridge.py` 실행에는 Python의 `serial` 모듈(pyserial)도 필요합니다. STM32를 사용하는 경우의 펌웨어·핀·프로젝트 가져오기 방법은 [MCU 안내](mcu/README.md)를 참고합니다.
 
 ### WSL2에서 Arduino 연결하기
 
@@ -290,6 +292,8 @@ ros2 run fall_patrol_bridge status_bridge --ros-args -p server_url:=http://SERVE
 
 ## Arduino 출력 장치
 
+보드별 펌웨어는 `mcu/arduino/`와 `mcu/stm32/`에 있습니다. 핀 연결·시리얼 명령·빌드 방법은 [MCU 안내](mcu/README.md)에 정리되어 있습니다.
+
 | 로봇 표시 (서버 값) | LED | LCD (1행 / 2행) |
 |---|---|---|
 | 대기 (`idle`) | 파랑 | IDLE / STANDBY |
@@ -330,7 +334,7 @@ backend/.venv/bin/python -B -m unittest discover -s backend/tests -p 'test_*.py'
 - **통합 코드·모의 검증:** `my_bot_fall`의 순찰·자세 판정·서버 직접 전송에 Pi 음성 요청·결과를 연결했습니다. 기존 사건 메모에 결과를 덧붙이며 실제 ROS2·장비 통합은 별도 검증 대상입니다.
 - **음성 실기 확인:** 2026년 10월 26~27일 사용자 시험에서 Pi USB 스피커로 두 안내 MP3 재생에 성공했고, USB 마이크의 ALSA 장치 인식을 확인했습니다. 상세 결과는 [TTS 시험 기록](voice/tts/README.md)을 참고합니다.
 - **Pi 음성 개별 시험:** 사용자가 전달한 `whisper.cpp` 모델 비교·녹음 시험 자료를 활용하며, 이번 연결은 Pi의 `base-q8_0`을 사용합니다. 개별 인식 성공과 전체 연동 성공은 구분합니다.
-- **별도 검증 필요:** ROS2→Pi 음성 실행→같은 서버 사건 메모 반영, ROS2·서버 지도 정합성, 서버 PC의 실제 STM32 펌웨어·USB 규약 및 출력. STM32 펌웨어는 현재 자료에서 확인하지 못했습니다.
+- **별도 검증 필요:** ROS2→Pi 음성 실행→같은 서버 사건 메모 반영, ROS2·서버 지도 정합성, 서버 PC와 실제 STM32의 전체 출력 연동. STM32 펌웨어·핀·명령 규약은 [소스와 MCU 안내](mcu/README.md)에서 확인할 수 있으며, 새 위치의 재빌드·보드 업로드·통합 동작은 실기 확인이 필요합니다.
 
 최종 운영에서는 **Ubuntu Desktop 원격 PC와 TurtleBot3의 Raspberry Pi**를 사용합니다. 실제 장치가 분리되면 ROS2 노드의 실행 위치, 서버 주소 및 네트워크 설정을 해당 환경에 맞춰 확인해야 합니다.
 
