@@ -1,5 +1,6 @@
 """Offline tests: real FastAPI + production state machine; ROS movement uses a test double."""
 import ast
+from collections import deque
 import importlib.util
 import json
 import math
@@ -112,6 +113,7 @@ def fake_node():
     n.path_xy=[];n.need_plan=False;n.published=[]
     n.wait_until=None;n.wait_seconds=2.;n.goal_pose=(1.,0.);n.current_pose=(0.,0.);n.current_yaw=0.
     n.goal_tolerance=.12;n.incident=None;n.image_jpeg=None
+    n.recent_images=deque(maxlen=90);n.observation_annotation=None
     n.journal=Path(tempfile.mkdtemp())/'incident.json'
     return n
 

@@ -1,5 +1,6 @@
 """Smooth A* + pose subscriber + existing project_3 HTTP API. Only this node drives cmd_vel."""
 import json
+from collections import deque
 import math
 import os
 from pathlib import Path
@@ -23,6 +24,7 @@ from geometry_msgs.msg import PoseStamped
 from .smooth_base import AStarDriver, world_to_grid
 from .patrol_logic import PatrolLogic
 from .voice_link import VoiceLink, append_note, voice_note
+from .event_photo_overlay import annotate_event_photo
 
 
 class FallPatrol(AStarDriver):
@@ -53,6 +55,9 @@ class FallPatrol(AStarDriver):
         self.incident = None
         self.image_jpeg = None
         self.image_seen = 0.0
+        # Match event annotations to a recent camera frame.
+        self.recent_images = deque(maxlen=90)
+        self.observation_annotation = None
         # Keep one photo from the CURRENT observation, even if the camera
         # later stops delivering frames before the 25-second alert deadline.
         self.observation_image = None
@@ -139,6 +144,8 @@ class FallPatrol(AStarDriver):
         if 'jpeg' in msg.format.lower() or 'jpg' in msg.format.lower():
             self.image_jpeg = bytes(msg.data)
             self.image_seen = self.last_frame_time
+            if stamp > 0:
+                self.recent_images.append((stamp, self.image_jpeg, self.image_seen))
 
     def pose_callback_message(self, msg):
         try:
@@ -210,6 +217,7 @@ class FallPatrol(AStarDriver):
                 self.sync_voice()
 
     def clear_observation_image(self):
+        self.observation_annotation = None
         self.observation_image = None
         self.observation_image_seen = 0.0
         self.observation_started = None
@@ -287,6 +295,21 @@ class FallPatrol(AStarDriver):
             f'최근 누움 {self.consecutive_lying_frames}회 + 저장된 사진 -> 낙상 의심 경고')
         return True
 
+    def image_matching_pose(self):
+        """Find the camera JPEG corresponding to the detector's source frame.
+
+        If clocks/frames cannot be matched, keep the legacy raw image but do
+        not attach potentially incorrect person coordinates to that image.
+        Called from the camera's mutually exclusive callback group.
+        """
+        source_stamp = self.pose_data.get('image_stamp')
+        if isinstance(source_stamp, (float, int)) and source_stamp > 0 and self.recent_images:
+            candidate = min(self.recent_images, key=lambda f: abs(f[0] - source_stamp))
+            if (abs(candidate[0] - source_stamp) <= 0.35
+                    and 0 <= self.pose_seen - candidate[2] < self.frame_timeout):
+                return candidate[1], candidate[2], True
+        return self.image_jpeg, self.image_seen, False
+
     def capture_observation_image(self):
         """Cache a recent JPEG only while the watched person is still visible.
 
@@ -301,19 +324,28 @@ class FallPatrol(AStarDriver):
             return
         frame = self.pose_data.get('pose_frame')
         people = self.pose_data.get('people', [])
-        watched = any(
-            self.logic.same(self.logic.target, dict(person, pose_frame=frame))
+        watched = next((
+            person for person in people
+            if self.logic.same(self.logic.target, dict(person, pose_frame=frame))
             and (person.get('raw') == 'lying' or
                  person.get('state') in ('lying', 'fell', 'fallen') or
                  person.get('fallen') is True)
-            for person in people
-        )
-        if not watched:
+        ), None)
+        if watched is None:
             return
-        # bytes are already copied by image_callback; a reference is enough.
+        photo, photo_seen, exact_frame = self.image_matching_pose()
+        if photo is None:
+            return
+        # Do not alter the live stream. Save the drawing info only alongside
+        # the photo of the CURRENT watched person in the CURRENT observation.
         first = self.observation_image is None
-        self.observation_image = self.image_jpeg
-        self.observation_image_seen = self.image_seen
+        self.observation_image = photo
+        self.observation_image_seen = photo_seen
+        self.observation_annotation = (
+            {'box': watched.get('box'), 'keypoints': watched.get('keypoints'),
+             'image_size': self.pose_data.get('image_size')}
+            if exact_frame and isinstance(watched.get('box'), list) else None
+        )
         if first:
             self.get_logger().info('관찰 중 사진 확보: 확인 필요/낙상 경고에 첨부 예정')
 
@@ -461,6 +493,14 @@ class FallPatrol(AStarDriver):
                           0 <= time.monotonic()-self.image_seen < self.frame_timeout)
         snapshot = (self.observation_image if from_observation else
                     self.image_jpeg if current_usable else None)
+        if from_observation and self.observation_annotation and snapshot is not None:
+            try:
+                snapshot = annotate_event_photo(
+                    snapshot, self.observation_annotation, self.logic.result)
+                self.get_logger().info('이벤트 사진: 대상 1명 바운딩 박스/관절 스켈레톤 표시')
+            except (ValueError, TypeError, cv2.error) as error:
+                self.get_logger().warn(f'이벤트 사진 시각화 실패: 원본 사용 ({error})')
+                # Keep the original photo even if annotation failed.
         self.incident = dict(token=str(uuid.uuid4()), event_id=None,
                              result=self.logic.result or 'uncertain', target=target,
                              fallback_source=self.fallback_alert_source,

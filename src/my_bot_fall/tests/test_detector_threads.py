@@ -30,7 +30,9 @@ def node():
     n.get_clock=lambda:O(now=lambda:O(nanoseconds=int(time.time()*1e9)))
     n.get_logger=lambda:O(warn=lambda *a:None,info=lambda *a:None,error=lambda *a:None)
     n.pose_frame='map';n.tf_frames=('map','odom','base_footprint');n.last_scan_time=n.start_time=time.time();n.last_scan_warn=0
-    n.closest_scan=lambda t:None;n.lookup_pose=lambda:(0,0,0);n.to_cv=lambda msg:O(size=12)
+    n.closest_scan=lambda t:None;n.lookup_pose=lambda:(0,0,0);n.to_cv=lambda msg:O(size=12,shape=(480,640,3))
+    n._inference_elapsed_sum=n._inference_elapsed_max=n._decode_elapsed_sum=0.0
+    n._inference_elapsed_samples=0
     n.core=O(fall_after_sec=10,reset_observation=lambda:None,process=lambda *a:({'state':'none'},O(size=12)))
     n._progress_log_at={};n._progress_log_state={};n.progress_log_interval=1.0
     n.cam=O(set_calibration=lambda *a:None);n.show=False;n.frames=0;n.fps_t0=time.time()
@@ -72,6 +74,13 @@ class DetectorTests(unittest.TestCase):
 
     def test_no_frames_diagnostic(self):
         n=node();n.watchdog();self.assertEqual(n.messages[-1]['camera_status'],'no_frames')
+
+    def test_result_includes_source_image_size_and_processing_metrics(self):
+        n=node();n.on_image(O(stamp=time.time()));n.tick()
+        self.assertEqual(n.messages[-1]['image_size'],[640,480])
+        self.assertEqual(n._inference_elapsed_samples,1)
+        self.assertGreaterEqual(n._inference_elapsed_sum,0)
+        self.assertGreaterEqual(n._decode_elapsed_sum,0)
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

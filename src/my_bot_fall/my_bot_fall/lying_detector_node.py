@@ -45,7 +45,7 @@ from geometry_msgs.msg import PoseWithCovarianceStamped
 import tf2_ros
 from rclpy.time import Time
 from rclpy.node import Node
-from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, CompressedImage, Image, LaserScan
@@ -1561,6 +1561,11 @@ class LyingCore:
                     "fall": bool(self.fall.showing(pid, now)),
                     "state": state, "state_sec": round(state_sec, 1), "fallen": state == "fallen",
                     "box": [int(v) for v in box],
+                    # Event-photo overlay only. Missing/low-confidence joints are
+                    # explicitly null; they are never drawn as fake skeleton limbs.
+                    "keypoints": [[round(float(kxy[i][0]), 1), round(float(kxy[i][1]), 1)]
+                                  if ok_kpt(kxy, kconf, i, w, h) else None
+                                  for i in range(min(17, len(kconf)))],
                 })
                 fall_on = state in ("fell", "fallen") or self.fall.showing(pid, now)
                 draw_person(frame, box, kxy, kconf, label, show_id, lying_sec, m, fall_on, True,
@@ -1771,7 +1776,15 @@ class LyingDetectorNode(Node):
             raise ValueError("rate/timeouts must be positive; motion_threshold must be nonnegative")
         self.sensor_lock = threading.Lock()
         self.reset_requested = threading.Event()
+        # The high-rate camera/LiDAR callbacks are tiny and must not wait for
+        # map, health, or YOLO inference callbacks. Lock protects shared state.
+        self.sensor_group = ReentrantCallbackGroup()
+        self.health_group = MutuallyExclusiveCallbackGroup()
         self.inference_group = MutuallyExclusiveCallbackGroup()
+        self._inference_elapsed_sum = 0.0
+        self._inference_elapsed_max = 0.0
+        self._decode_elapsed_sum = 0.0
+        self._inference_elapsed_samples = 0
         self.last_raw_mono = 0.0
         self.last_result_mono = time.monotonic()
         self.inference_started = self.last_result_mono
@@ -1797,9 +1810,16 @@ class LyingDetectorNode(Node):
 
         # 토픽 이름이 compressed로 끝나면 압축 영상, 아니면 일반 영상(가제보 /camera/image_raw 등)
         img_type = CompressedImage if g("image_topic").endswith("compressed") else Image
-        self.create_subscription(img_type, g("image_topic"), self.on_image, qos_profile_sensor_data)
-        self.create_subscription(LaserScan, g("scan_topic"), self.on_scan, qos_profile_sensor_data)
-        self.create_subscription(CameraInfo, g("camera_info_topic"), self.on_info, qos_profile_sensor_data)
+        # Latest-frame-only QoS: no 5-frame DDS camera backlog during inference.
+        # BEST_EFFORT can receive from the RELIABLE v4l2_camera publisher.
+        camera_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT,
+                                durability=DurabilityPolicy.VOLATILE)
+        self.create_subscription(img_type, g("image_topic"), self.on_image, camera_qos,
+                                 callback_group=self.sensor_group)
+        self.create_subscription(LaserScan, g("scan_topic"), self.on_scan, qos_profile_sensor_data,
+                                 callback_group=self.sensor_group)
+        self.create_subscription(CameraInfo, g("camera_info_topic"), self.on_info, qos_profile_sensor_data,
+                                 callback_group=self.sensor_group)
         amcl_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                               durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(PoseWithCovarianceStamped, g("amcl_topic"), self.on_amcl, amcl_qos)
@@ -1808,7 +1828,7 @@ class LyingDetectorNode(Node):
         self.pub_state = self.create_publisher(String, "/pose_state", 10)
         self.pub_debug = self.create_publisher(CompressedImage, "/lying_detector/debug/compressed", 1)
         self.create_timer(1.0 / g("rate"), self.tick, callback_group=self.inference_group)
-        self.create_timer(0.2, self.watchdog)
+        self.create_timer(0.2, self.watchdog, callback_group=self.health_group)
         self.start_time = time.time()
         self.last_img_time = 0.0
         self.last_scan_time = 0.0
@@ -2017,6 +2037,7 @@ class LyingDetectorNode(Node):
             self.publish_unavailable(problem)
             return
         self.inference_started = time.monotonic()
+        decode_started = self.inference_started
         try:
             frame = self.to_cv(msg)
         except (ValueError, cv2.error):
@@ -2035,12 +2056,19 @@ class LyingDetectorNode(Node):
 
         pose = self.lookup_pose()
         self.core.map_ok = self.pose_frame == self.tf_frames[0]
+        infer_started = time.monotonic()
+        decode_elapsed = infer_started - decode_started
         try:
             result, debug = self.core.process(frame, scan, pose, now)
         except Exception as error:
             self.get_logger().error(f"추론 실패: {error}")
             self.publish_unavailable("inference_error")
             return
+        infer_elapsed = time.monotonic() - infer_started
+        self._inference_elapsed_sum += infer_elapsed
+        self._inference_elapsed_max = max(self._inference_elapsed_max, infer_elapsed)
+        self._decode_elapsed_sum += decode_elapsed
+        self._inference_elapsed_samples += 1
         problem = self.image_problem(msg, received_mono)
         if problem or self.reset_requested.is_set() or getattr(self, "unavailable_during_inference", False):
             self.publish_unavailable(problem or "observation_interrupted")
@@ -2048,6 +2076,7 @@ class LyingDetectorNode(Node):
         self.last_result_mono = time.monotonic()
         self.last_health_reason = None
         result["image_stamp"] = self.stamp_sec(msg)
+        result["image_size"] = [int(frame.shape[1]), int(frame.shape[0])]
         result["pose_frame"] = self.pose_frame
         self.pub_state.publish(String(data=json.dumps(result, ensure_ascii=False)))
         self.log_still_progress(result)
@@ -2067,14 +2096,22 @@ class LyingDetectorNode(Node):
         # 10초마다 실제 처리 속도 출력 (rate보다 많이 낮으면 n 모델이나 rate 낮추기)
         self.frames += 1
         if now - self.fps_t0 >= 10:
-            self.get_logger().info(f"처리 속도 {self.frames / (now - self.fps_t0):.1f} FPS")
+            samples = max(1, self._inference_elapsed_samples)
+            self.get_logger().info(
+                f"처리 속도 {self.frames / (now - self.fps_t0):.1f} FPS | "
+                f"YOLO 평균 {1000 * self._inference_elapsed_sum / samples:.0f}ms "
+                f"최대 {1000 * self._inference_elapsed_max:.0f}ms | "
+                f"프레임 준비+TF 평균 {1000 * self._decode_elapsed_sum / samples:.0f}ms")
             self.frames, self.fps_t0 = 0, now
+            self._inference_elapsed_sum = self._inference_elapsed_max = 0.0
+            self._decode_elapsed_sum = 0.0
+            self._inference_elapsed_samples = 0
 
 
 def main():
     rclpy.init()
     node = LyingDetectorNode()
-    executor = MultiThreadedExecutor(num_threads=3)
+    executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
     try:
         executor.spin()
