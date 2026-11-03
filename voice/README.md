@@ -8,6 +8,12 @@ Pi 재생·녹음과 서버 PC의 `whisper.cpp` 인식·분류를 ROS2 순찰에
 서버·Pi 작업 경로는 [최상위 README](../README.md#실행-환경과-작업-경로), Pi MP3 재생 시험 결과와 새 목표 경로의 검증 상태는 [TTS README](tts/README.md)를 참고한다.
 Pi에서 USB 마이크 녹음과 `whisper.cpp` 기반 한국어 음성 인식·모델별 처리 시간 비교 등 개별 시험을 진행했다. 인식을 서버로 옮긴 구성의 전송·실제 추론 시간과 ROS2 순찰→Pi 음성→같은 서버 사건 기록 전체 연동은 아직 실기 검증이 필요하다. Pi의 WAV는 전송 후 삭제하고, 서버의 유효한 녹음은 `voice/recordings/`에 보관해 사건 상세에서 재생한다. 이 폴더는 Git에서 제외하며 자동 삭제는 하지 않는다. 서버 음성 API는 사건 색상·관리자 메모를 바꾸지 않고 음성 전용 기록에 상태·결과·원음 주소를 저장한다. 사건 상세의 음성 응답 영역은 진행 상태·인식 문장·분류를 자동 갱신한다.
 
+응답 분류는 `stt/response_classifier.py`의 도움 요청 91개·거절 61개를 사용한다.
+문장 전체가 등록 표현과 일치할 때 분류하고, 미등록·빈 인식 결과는 `확인 필요`로 표시한다.
+대표 표현과 판정 기준은 [STT 안내](stt/README.md#등록-표현-분류)를 참고한다.
+서버 인식에서는 서버 PC의 분류 파일을 갱신한 뒤 FastAPI를 다시 시작한다.
+Pi 로컬 인식 시험에도 확장 목록을 쓰려면 Pi의 분류 파일을 함께 갱신한다.
+
 ## 구성
 
 ```text
@@ -160,6 +166,6 @@ backend/.venv/bin/python -B -m unittest voice.test_dialogue -v
 backend/.venv/bin/python -B -m unittest discover -s voice/stt -p 'test_*.py' -v
 ```
 
-정상 결과는 `Ran 18 tests`와 `OK`이다.
+정상 종료 시 `OK`가 출력된다.
 모의 테스트는 실제 음성 합성 서비스 연결·녹음·모델 추론을 검증하지 않는다.
 STT 실동작은 녹음 프로그램으로 확인한다.

@@ -174,10 +174,25 @@ class VoiceApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.post(expires=clock[0]+1))[0], 408)
 
     async def test_server_uses_same_registered_expression_policy(self):
-        for i, text in enumerate(("사람 좀 불러 주세요!", "괜찮아요", "괜찮아요. 그런데 못 일어나요", "")):
-            self.text = text
-            _, result, _ = await self.post(key=str(i))
-            self.assertEqual(result["classification"], ("도움 필요", "도움 불필요", "확인 필요", "확인 필요")[i])
+        examples = (
+            ("사람 좀 불러 주세요!", "도움 필요"),        # 기존 도움 요청
+            ("저 좀 일으켜 주세요!", "도움 필요"),      # 확장: 부축
+            ("119에 신고해 주세요", "도움 필요"),      # 확장: 구조
+            ("괜찮아요", "도움 불필요"),              # 기존 도움 거절
+            ("저는 도움이 필요 없습니다", "도움 불필요"), # 확장: 명시적 거절
+            ("저를 도와주실 필요 없어요", "도움 불필요"),
+            ("괜찮아요. 그런데 못 일어나요", "확인 필요"),
+            ("도움 필요 없어요. 하지만 도와주세요", "확인 필요"),
+            ("괜찮지 않아요", "확인 필요"),
+            ("못 일어나요", "확인 필요"),
+            ("", "확인 필요"),
+        )
+        for i, (text, expected) in enumerate(examples):
+            with self.subTest(text=text):
+                self.text = text
+                _, result, _ = await self.post(key=f"expanded-policy-{i}")
+                self.assertEqual(result["classification"], expected)
+                self.assertFalse(result["speech_validated"])
 
     async def progress(self, phase, key="observation-one"):
         return await self.client.request("POST", f"/voice/{key}/progress",
