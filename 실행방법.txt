@@ -5,6 +5,8 @@ Ubuntu Desktop 서버 PC 작업 경로: ~/robotech/project_ws/
 Pi 자체 개발 프로그램의 목표 경로와 기존 ROBOTIS 환경 구분은 README.md의
 '실행 환경과 작업 경로'를 따른다. Pi 새 경로로의 배치·실행은 아직 검증되지 않았다.
 
+실제 로봇의 전체 실행 순서(순찰·음성·LED·LCD)와 확인 결과는 docs/HANDOVER.md를 따른다.
+
 [A] 개인 개발 환경
 ----------------------------------------
 환경 생성·설치·활성화·설치 확인과 로컬 서버 실행 명령은
@@ -26,10 +28,11 @@ ssh ubuntu@ROBOT_IP
 
 아래는 기존 ~/turtlebot3_ws/가 빌드되어 있고 카메라 패키지도 준비된 환경 기준이다.
 기존 ROBOTIS 작업공간을 유지하며, Pi 자체 개발용 목표 경로로 옮기는 절차가 아니다.
-접속 후 기존 ROS2 환경을 불러오고 실행:
+접속 후 기존 ROS2 환경을 불러오고 실행한다. NUCLEO 등 다른 USB 장치가 함께 연결되면
+기본값 /dev/ttyACM0이 OpenCR이 아닐 수 있으므로 usb_port를 고유 경로로 지정한다.
 source /opt/ros/humble/setup.bash
 source ~/turtlebot3_ws/install/setup.bash
-ros2 run v4l2_camera v4l2_camera_node > /dev/null 2>&1 & ros2 launch turtlebot3_bringup robot.launch.py
+ros2 run v4l2_camera v4l2_camera_node > /dev/null 2>&1 & ros2 launch turtlebot3_bringup robot.launch.py usb_port:=$(ls /dev/serial/by-id/usb-ROBOTIS_OpenCR*)
 
 끄기: Ctrl+C (bringup 종료) 후
 pkill -f v4l2_camera
@@ -38,6 +41,8 @@ pkill -f v4l2_camera
 [2] Ubuntu Desktop 서버 PC 터미널: 서버 + 영상
 ----------------------------------------
 web_video_server가 현재 PC의 ROS2 환경에 준비되고 Pi의 카메라 토픽을 수신하는 전제다.
+web_video_server가 설치되어 있지 않으면 다음 명령으로 설치한다.
+sudo apt install ros-humble-web-video-server
 별도 ROS2 오버레이를 사용한다면 해당 환경도 먼저 불러온다.
 source /opt/ros/humble/setup.bash
 cd ~/robotech/project_ws

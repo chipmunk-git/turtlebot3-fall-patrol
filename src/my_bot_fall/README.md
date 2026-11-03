@@ -50,6 +50,8 @@ colcon build --base-paths src --packages-select my_bot_fall
 source install/setup.bash
 ```
 
+실제 로봇의 전체 실행 순서와 확인 결과는 [인수인계 문서](../../docs/HANDOVER.md)에 정리되어 있습니다.
+
 ### 지도 제공·위치 추정 (별도 터미널)
 
 Pi의 기존 bringup·카메라를 실행한 뒤 Ubuntu PC의 별도 터미널에서 실행합니다. `nav2_bringup`과 그 의존 패키지인 지도 서버·AMCL·lifecycle manager, `rviz2`가 준비되어 있어야 합니다. 같은 ROS2 환경에서 지도 서버·AMCL 또는 SLAM이 이미 실행 중이면 중복 실행하지 않습니다.
@@ -141,7 +143,7 @@ ros2 run my_bot_fall voice --ros-args \
   -p server_url:=http://SERVER_IP:8000
 ```
 
-기본 녹음·재생 장치는 ALSA `default`입니다. 필요하면 실제 장치를 `-p input_device:=...`, `-p output_device:=...`로 지정하며 Python은 `-p python_executable:=...`로 지정합니다. `server_url`을 생략하면 기존 Pi 로컬 인식 시험 모드이며 이때만 `model_path`·`whisper_cli`를 사용합니다. 원격 인식 중 서버가 실패해도 Pi 로컬 추론으로 자동 전환하지 않습니다.
+기본 녹음·재생 장치는 ALSA `default`입니다. 카드 번호는 바뀔 수 있으므로 `arecord -l`, `aplay -l`의 이름으로 `-p input_device:=plughw:CARD=microphone,DEV=0`, `-p output_device:=plughw:CARD=UACDemoV10,DEV=0`처럼 지정하는 것을 권장합니다. 필요하면 실제 장치를 `-p input_device:=...`, `-p output_device:=...`로 지정하며 Python은 `-p python_executable:=...`로 지정합니다. `server_url`을 생략하면 기존 Pi 로컬 인식 시험 모드이며 이때만 `model_path`·`whisper_cli`를 사용합니다. 원격 인식 중 서버가 실패해도 Pi 로컬 추론으로 자동 전환하지 않습니다.
 
 ### 사건별 경고 안내
 
@@ -164,19 +166,19 @@ python3 voice/stt/whisper_session.py --server-url http://SERVER_IP:8000
 
 Pi에서 취소하면 전송·음성 자식 프로세스와 로컬 임시 WAV를 정리합니다. 서버 추론은 즉시 중단된다고 보장하지 않으며 제한 시간 내 종료합니다. 서버에 이미 보관한 녹음은 남기되, 취소된 기록을 늦은 추론 결과로 완료 상태로 바꾸지 않습니다. 기존 요청 ID·만료·취소 검사와 90초 음성 교환 제한은 유지합니다.
 
-## 서버 PC: 기존 출력 장치 연결
+## 출력 장치 연결
 
-USB 장치·펌웨어를 확인한 뒤 브리지 터미널에서 실행합니다.
+브리지는 **USB 장치가 연결된 컴퓨터**에서 실행합니다. 실제 로봇은 NUCLEO가 Pi에 연결되므로 Pi에서 실행합니다. 번호는 연결 순서에 따라 바뀌므로 `ls -l /dev/serial/by-id/`로 확인한 고유 경로를 사용합니다.
 
 ```bash
-cd ~/robotech/project_ws
+cd ~/fall_patrol/project_ws
 source /opt/ros/humble/setup.bash
 colcon build --base-paths src --packages-select tb3_arduino_io
 source install/setup.bash
-ros2 run tb3_arduino_io bridge --ros-args -p port:=/dev/ttyACM0
+ros2 run tb3_arduino_io bridge --ros-args -p port:=$(ls /dev/serial/by-id/usb-STMicroelectronics_STM32_STLink*)
 ```
 
-상태 조회 프로그램 터미널에서 실행합니다.
+상태 조회 프로그램은 서버 PC에서 실행합니다. 브리지와 ROS2 토픽으로 통신합니다.
 
 ```bash
 cd ~/robotech/project_ws
@@ -185,7 +187,7 @@ source install/setup.bash
 python3 src/dev_scripts/status_to_arduino.py --server-url http://127.0.0.1:8000
 ```
 
-`/dev/ttyACM0`은 예시입니다. 브리지는 115200 baud, 줄바꿈으로 끝나는 `R,r,g,b`, `L,첫째줄|둘째줄`, `P,0/1`, `B,0/1`, `H`를 보냅니다. LCD는 표시 가능한 ASCII만 사용합니다. Arduino Uno와 STM32 NUCLEO-F103RB의 펌웨어·핀·명령 규약은 [MCU 안내](../../mcu/README.md)를 참고합니다. 두 소스에서 같은 명령 처리를 확인했으며, 실제 STM32 보드와 브리지의 전체 연동은 별도 실기 확인이 필요합니다.
+브리지의 `port` 기본값은 `/dev/ttyACM0`이지만, 같은 번호에 다른 장치가 잡힐 수 있으므로 지정해서 실행합니다. 브리지는 115200 baud, 줄바꿈으로 끝나는 `R,r,g,b`, `L,첫째줄|둘째줄`, `P,0/1`, `B,0/1`, `H`를 보냅니다. LCD는 표시 가능한 ASCII만 사용합니다. Arduino Uno와 STM32 NUCLEO-F103RB의 펌웨어·핀·명령 규약은 [MCU 안내](../../mcu/README.md)를 참고합니다. 두 소스에서 같은 명령 처리를 확인했으며, 실제 STM32 보드와 브리지의 전체 연동은 별도 실기 확인이 필요합니다.
 
 상태 조회 프로그램은 RGB·LCD 문구·LCD 전원을 자동 갱신합니다. 로봇 표시는 대기(`idle`, 파랑)·순찰(`patrol`, 초록)·관찰(`observe`, 노랑)·알림(`alert`, 빨강) 네 가지입니다. 이전 `suspect`·`approach`는 표시에서만 관찰로 묶으며 서버 값·기록·주행 동작은 바꾸지 않습니다. 사건 처리 상태는 별도로 유지합니다. 부저는 로봇 상태와 별개로, 웹에 팝업이 표시된 미처리 빨강·노랑 사건을 기준으로 울립니다. 조치 완료·오탐·해당 사건의 경보음 끄기로 경보 대상이 없어지면 끕니다. 상세 창 버튼은 사건 상태·주행·음성을 바꾸지 않습니다. 기존 LCD 문구와 부저 반복음 패턴은 유지하며, 서버 조회 실패·정상 종료(Ctrl+C) 시에는 부저를 끕니다. 사건 경보 조회만 실패하면 RGB·LCD는 계속 갱신합니다. 표시 조건·API·버튼 동작은 [출력 장치 안내](../../README.md#arduino-출력-장치)를 참고하며, 실제 보드·브라우저 통합은 별도 실기 확인이 필요합니다.
 
