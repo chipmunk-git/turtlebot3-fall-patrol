@@ -53,13 +53,17 @@ class BackendIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.main.app.dependency_overrides.pop(get_db, None)
         self.engine.dispose()
 
-    async def request(self, method, url, data=None, form=False):
+    async def request(self, method, url, data=None, form=False, content_type=None, extra_headers=None):
         parsed = urlsplit(url)
         headers = []
         body = b""
         if data is not None:
-            body = (urlencode(data) if form else json.dumps(data)).encode()
-            content_type = b"application/x-www-form-urlencoded" if form else b"application/json"
+            if isinstance(data, bytes):
+                body = data
+                content_type = content_type or b"application/octet-stream"
+            else:
+                body = (urlencode(data) if form else json.dumps(data)).encode()
+                content_type = b"application/x-www-form-urlencoded" if form else b"application/json"
             headers = [(b"content-type", content_type), (b"content-length", str(len(body)).encode())]
         scope = {
             "type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"},
@@ -68,6 +72,7 @@ class BackendIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "query_string": parsed.query.encode(), "headers": headers,
             "server": ("test", 80), "client": ("test", 1234),
         }
+        scope["headers"].extend(extra_headers or [])
         incoming = asyncio.Queue()
         incoming.put_nowait({"type": "http.request", "body": body, "more_body": False})
         messages = []
@@ -86,7 +91,8 @@ class BackendIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     def add_event(self, **fields):
         with Session(self.engine) as db:
-            event = Event(x=0, y=0, status=EventStatus.CONFIRMED, **fields)
+            fields.setdefault("status", EventStatus.CONFIRMED)
+            event = Event(x=0, y=0, **fields)
             db.add(event)
             db.commit()
             return event.id
@@ -193,6 +199,99 @@ class BackendIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(columns, [column["name"] for column in inspect(self.engine).get_columns("events")])
         with Session(self.engine) as db:
             self.assertEqual(db.get(Event, event_id).note, "existing event")
+
+    async def test_event_alarm_waits_for_popup_before_ringing(self):
+        event_id = self.add_event()
+        _, alarms, _ = await self.request("GET", "/events/alarms")
+        self.assertEqual(alarms["active_event_ids"], [])
+        code, result, _ = await self.request("POST", f"/events/{event_id}/alarm/presented")
+        self.assertEqual(code, 200)
+        self.assertEqual(result, dict(event_id=event_id, presented=True, muted=False, active=True))
+        _, alarms, _ = await self.request("GET", "/events/alarms")
+        self.assertEqual(alarms["active_event_ids"], [event_id])
+
+    async def test_only_red_and_yellow_events_can_activate_alarm(self):
+        for status in EventStatus:
+            with self.subTest(status=status):
+                event_id = self.add_event(status=status)
+                _, result, _ = await self.request("POST", f"/events/{event_id}/alarm/presented")
+                self.assertEqual(result["active"], status in (EventStatus.CONFIRMED, EventStatus.UNCERTAIN))
+
+    async def test_event_mute_keeps_status_voice_note_and_robot_control_unchanged(self):
+        event_id = self.add_event(note="[voice:example] 도움 필요")
+        _, before, _ = await self.request("GET", f"/events/{event_id}")
+        _, robot, _ = await self.request("GET", "/status")
+        _, drive, _ = await self.request("GET", "/control")
+        await self.request("POST", f"/events/{event_id}/alarm/presented")
+        _, result, _ = await self.request("POST", f"/events/{event_id}/alarm/mute")
+        self.assertTrue(result["muted"])
+        self.assertFalse(result["active"])
+        _, after, _ = await self.request("GET", f"/events/{event_id}")
+        self.assertEqual(after, before)
+        self.assertEqual((await self.request("GET", "/status"))[1], robot)
+        self.assertEqual((await self.request("GET", "/control"))[1], drive)
+
+    async def test_mute_is_per_event_and_new_events_still_ring(self):
+        first = self.add_event()
+        second = self.add_event(status=EventStatus.UNCERTAIN)
+        for event_id in (first, second):
+            await self.request("POST", f"/events/{event_id}/alarm/presented")
+        await self.request("POST", f"/events/{first}/alarm/mute")
+        _, alarms, _ = await self.request("GET", "/events/alarms")
+        self.assertEqual(alarms["active_event_ids"], [second])
+        self.assertEqual(alarms["muted_event_ids"], [first])
+        third = self.add_event()
+        await self.request("POST", f"/events/{third}/alarm/presented")
+        self.assertEqual((await self.request("GET", "/events/alarms"))[1]["active_event_ids"], [second, third])
+
+    async def test_resolved_and_false_alarm_stop_without_changing_robot_alert(self):
+        await self.request("PUT", "/status", {"state": "alert"})
+        for status in ("resolved", "false_alarm"):
+            with self.subTest(status=status):
+                event_id = self.add_event()
+                await self.request("POST", f"/events/{event_id}/alarm/presented")
+                await self.request("PATCH", f"/events/{event_id}", {"status": status})
+                self.assertEqual((await self.request("GET", "/events/alarms"))[1]["active_event_ids"], [])
+        self.assertEqual((await self.request("GET", "/status"))[1]["state"], "alert")
+
+    async def test_popup_retries_and_backend_restart_never_unmute_event(self):
+        event_id = self.add_event()
+        for _ in range(2):
+            await self.request("POST", f"/events/{event_id}/alarm/presented")
+        for _ in range(2):
+            await self.request("POST", f"/events/{event_id}/alarm/mute")
+        with patch.object(self.main, "engine", self.engine):
+            async with self.main.lifespan(self.main.app):
+                pass
+        _, result, _ = await self.request("POST", f"/events/{event_id}/alarm/presented")
+        self.assertTrue(result["muted"])
+        self.assertFalse(result["active"])
+        with Session(self.engine) as db:
+            logs = list(db.scalars(select(ActivityLog).where(ActivityLog.event_id == event_id)))
+            self.assertEqual(sorted(log.kind for log in logs), ["event_alarm_muted", "event_alarm_presented"])
+
+    async def test_muting_before_popup_and_delayed_closed_popup_do_not_ring(self):
+        event_id = self.add_event()
+        await self.request("POST", f"/events/{event_id}/alarm/mute")
+        _, result, _ = await self.request("POST", f"/events/{event_id}/alarm/presented")
+        self.assertFalse(result["active"])
+        other = self.add_event()
+        await self.request("PATCH", f"/events/{other}", {"status": "resolved"})
+        _, result, _ = await self.request("POST", f"/events/{other}/alarm/presented")
+        self.assertFalse(result["presented"])
+        self.assertFalse(result["active"])
+
+    async def test_missing_event_alarm_actions_return_not_found(self):
+        for action in ("presented", "mute"):
+            code, _, _ = await self.request("POST", f"/events/999/alarm/{action}")
+            self.assertEqual(code, 404)
+
+    async def test_alarm_query_is_not_limited_to_first_dashboard_page(self):
+        first = self.add_event()
+        newer = self.add_event()
+        await self.request("POST", f"/events/{first}/alarm/presented")
+        self.assertEqual((await self.request("GET", "/events?limit=1"))[1][0]["id"], newer)
+        self.assertEqual((await self.request("GET", "/events/alarms"))[1]["active_event_ids"], [first])
 
 
 if __name__ == "__main__":

@@ -2,11 +2,11 @@
 
 TTS 작업 파일은 `voice/tts/`, STT 작업 파일은 `voice/stt/`에 둔다.
 
-Pi의 `whisper.cpp`와 ROS2 순찰을 연결하는 실행 방법은 [순찰·Pi 음성 연결 안내](../src/my_bot_fall/README.md)를 참고한다. `voice/stt/whisper_session.py`는 재생 → 녹음 → 인식 → 분류를 수행하고, `my_bot_fall`의 Pi 음성 노드가 결과를 순찰 노드에 전달한다. 아래 Python Whisper 개발용 실행 방식은 그대로 유지한다.
+Pi 재생·녹음과 서버 PC의 `whisper.cpp` 인식·분류를 ROS2 순찰에 연결하는 방법은 [순찰·Pi 음성 연결 안내](../src/my_bot_fall/README.md)를 참고한다. `voice/stt/whisper_session.py --server-url http://SERVER_IP:8000`은 재생 → 5초 녹음 → WAV 전송 → 서버 인식·분류 결과 수신을 수행하고, Pi 음성 노드가 결과를 기존 순찰 노드에 전달한다. 서버는 기존 `ggml-base-q8_0.bin` 모델을 사용한다. 아래 Python Whisper 개발용 실행 방식은 그대로 유지한다.
 
 개인 개발 환경의 생성·설치·활성화와 서버 실행은 [최상위 README의 개인 개발 환경](../README.md#개인-개발-환경-python-310)을 따른다.
 서버·Pi 작업 경로는 [최상위 README](../README.md#실행-환경과-작업-경로), Pi MP3 재생 시험 결과와 새 목표 경로의 검증 상태는 [TTS README](tts/README.md)를 참고한다.
-Pi에서 USB 마이크 녹음과 `whisper.cpp` 기반 한국어 음성 인식·모델별 처리 시간 비교 등 개별 시험을 진행했다. ROS2 순찰에서 Pi 음성을 실행하고 결과를 같은 서버 사건에 반영하는 전체 연동은 아직 실기 검증이 필요하다.
+Pi에서 USB 마이크 녹음과 `whisper.cpp` 기반 한국어 음성 인식·모델별 처리 시간 비교 등 개별 시험을 진행했다. 인식을 서버로 옮긴 구성의 전송·실제 추론 시간과 ROS2 순찰→Pi 음성→같은 서버 사건 기록 전체 연동은 아직 실기 검증이 필요하다. Pi의 WAV는 전송 후 삭제하고, 서버의 유효한 녹음은 `voice/recordings/`에 보관해 사건 상세에서 재생한다. 이 폴더는 Git에서 제외하며 자동 삭제는 하지 않는다. 서버 음성 API는 사건 색상·관리자 메모를 바꾸지 않고 음성 전용 기록에 상태·결과·원음 주소를 저장한다. 사건 상세의 음성 응답 영역은 진행 상태·인식 문장·분류를 자동 갱신한다.
 
 ## 구성
 
@@ -17,11 +17,14 @@ voice/
 ├── dialogue.py                  # 안내 재생 → 녹음·인식 → 결과 반환
 ├── test_dialogue.py             # 장비 없는 연결부 모의 테스트
 ├── tts/                         # 안내 MP3
+├── recordings/                  # 서버의 사건 원음 보관, Git 제외
 └── stt/                         # 녹음·인식·분류·모의 테스트
     └── .models/                 # 로컬 Whisper 모델 캐시, Git 제외
 ```
 
 TTS 파일 목록과 설정은 [tts/README.md](tts/README.md), 녹음·인식·분류 사용법은 [stt/README.md](stt/README.md)를 참고한다.
+
+ROS2 순찰과 연결하면 같은 관찰의 안내·녹음·인식 결과 전달 후, 미처리 빨강·노랑 사건에 `alert.mp3`를 한 번 재생한다. 단독 개발용 명령은 기존대로 한 번의 안내·녹음·인식만 수행한다. 재생 조건·중복 방지·취소와 Pi 실행 설정은 [사건별 경고 안내](../src/my_bot_fall/README.md#사건별-경고-안내)를 참고한다.
 Whisper 모델 캐시는 `voice/stt/.models/`에 저장하며 Git에 포함하지 않는다.
 
 ## 실행 전제
@@ -49,7 +52,7 @@ backend/.venv/bin/python voice/stt/record_korean.py
 
 ## 안내 재생 후 응답 인식
 
-현재 `voice.dialogue`는 **실행한 컴퓨터에서 재생·녹음·Whisper 인식을 모두 수행**한다. 원격 PC로 음성을 보내 추론하는 기능은 구현되어 있지 않다.
+`voice.dialogue`는 **실행한 컴퓨터에서 재생·녹음·Whisper 인식을 모두 수행**하는 개발용 명령이다. 원격 인식은 위의 `whisper_session.py --server-url ...`을 사용한다.
 이 명령은 `voice/`의 관련 소스·안내 파일과 Python 의존성이 준비된 환경에서 사용하는 개발용 실행 방법이며, Pi의 최종 배치·실행 위치를 확정하는 안내는 아니다.
 
 프로젝트 루트에서 다음 명령을 실행하면 Whisper 모델을 준비하고, 기존 `observe.mp3`를

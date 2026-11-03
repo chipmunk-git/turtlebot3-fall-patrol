@@ -13,18 +13,36 @@ class VoiceLink:
         self.request = None
         self.result = None
         self.cancel = None
+        self.alert_request = None
+        self.alert_result = None
+        self.alert_checked_at = 0.0
 
     def start(self, now):
         self.request = {"request_id": str(uuid.uuid4()), "action": "observe",
                         "issued_at": now, "expires_at": now + self.timeout}
         self.result = None
         self.cancel = None
+        self.alert_request = None
+        self.alert_result = None
 
     def end(self):
         if self.request:
             self.cancel = dict(self.request, action="cancel")
         self.request = None
         self.result = None
+        self.alert_request = None
+        self.alert_result = None
+
+    def queue_alert(self, event_id, now):
+        """Called only after GET confirms the same event is still pending."""
+        if (not self.request or self.result is None or self.cancel is not None
+                or type(event_id) is not int or event_id <= 0):
+            return
+        if self.alert_request is None:
+            self.alert_request = dict(request_id=self.request['request_id'], action='alert',
+                                      event_id=event_id, issued_at=now, expires_at=now+20.0)
+        if self.alert_request['event_id'] == event_id:
+            self.alert_checked_at = now
 
     def message(self, now):
         if self.request and self.result is None:
@@ -35,9 +53,22 @@ class VoiceLink:
                 self.cancel = dict(self.request, action="cancel")
             else:
                 return dict(self.request)
+        if (self.alert_request and self.alert_result is None and self.cancel is None
+                and now < self.alert_request['expires_at']
+                and 0 <= now-self.alert_checked_at <= 2.0):
+            return dict(self.alert_request)
         return self.cancel
 
     def accept(self, data, now, allow_expired=False):
+        if isinstance(data, dict) and data.get('action') == 'alert':
+            if (not self.alert_request or self.alert_result is not None
+                    or data.get('request_id') != self.alert_request['request_id']
+                    or data.get('event_id') != self.alert_request['event_id']
+                    or now >= self.alert_request['expires_at']
+                    or data.get('status') not in ('ok', 'error')):
+                return False
+            self.alert_result = dict(data)
+            return True
         if (not isinstance(data, dict) or not self.request or self.result is not None
                 or data.get("request_id") != self.request["request_id"]
                 or (now >= self.request["expires_at"] and not allow_expired)
@@ -78,7 +109,9 @@ def voice_note(result):
 
 
 def valid_request(data, now):
-    if not isinstance(data, dict) or data.get("action") not in ("observe", "cancel"):
+    if not isinstance(data, dict) or data.get("action") not in ("observe", "alert", "cancel"):
+        return False
+    if data['action'] == 'alert' and (type(data.get('event_id')) is not int or data['event_id'] <= 0):
         return False
     request_id = data.get("request_id")
     if not isinstance(request_id, str) or not 1 <= len(request_id) <= 100:

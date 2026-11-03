@@ -109,6 +109,23 @@ class RobotStatus(Base):
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 
 
+class VoiceRecord(Base):
+    """A voice exchange linked by observation ID; event columns stay unchanged."""
+
+    __tablename__ = "voice_records"
+
+    request_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    event_id: Mapped[int | None] = mapped_column(ForeignKey("events.id"), index=True)
+    phase: Mapped[str] = mapped_column(String(24), default="pending")
+    expires_at: Mapped[float | None]
+    digest: Mapped[str | None] = mapped_column(String(64))
+    audio_filename: Mapped[str | None] = mapped_column(String(40))
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+
+
 class RobotControl(Base):
     """웹에서 로봇에게 내리는 주행 명령. 로봇이 GET /control로 읽어 간다 (한 줄만 쓴다)."""
 

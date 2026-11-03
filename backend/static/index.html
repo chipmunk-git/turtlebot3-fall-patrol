@@ -135,6 +135,17 @@
   <dialog id="detail" class="detail">
     <form method="dialog" class="detail-close"><button aria-label="닫기">✕</button></form>
     <div id="detail-body"></div>
+    <section class="voice-response" aria-labelledby="voice-heading">
+      <div class="voice-response-head">
+        <h3 id="voice-heading">음성 응답</h3>
+        <span id="voice-progress" role="status" aria-live="polite">확인 중…</span>
+      </div>
+      <p id="voice-text" class="voice-transcript">아직 결과가 없습니다.</p>
+      <p>응답 분류: <strong id="voice-classification">—</strong></p>
+      <p id="voice-message" class="voice-message"></p>
+      <audio id="voice-audio" controls preload="none" aria-label="이 사건의 원음 녹음 재생" hidden></audio>
+      <p id="voice-audio-empty" class="voice-message">녹음 수신 대기</p>
+    </section>
     <label class="note">
       <span>메모</span>
       <textarea id="detail-note" rows="3" placeholder="현장 확인 내용 등"></textarea>

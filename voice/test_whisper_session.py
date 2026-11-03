@@ -2,6 +2,7 @@
 
 import array
 import io
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -12,6 +13,7 @@ import time
 import unittest
 from unittest.mock import patch
 import wave
+from urllib.error import URLError
 
 from voice.stt import whisper_session as session
 
@@ -25,6 +27,7 @@ class WhisperSessionTests(unittest.TestCase):
         for path in self.paths:
             path.touch()
         self.calls = []
+        self.progress_reports = []
         self.samples = [500, -500] * 100
 
     def command(self, args, timeout):
@@ -40,7 +43,8 @@ class WhisperSessionTests(unittest.TestCase):
 
     def exchange(self, **options):
         with patch.object(session.shutil, "which", return_value="/mock/bin"), \
-             patch.object(session, "run_command", side_effect=self.command):
+             patch.object(session, "run_command", side_effect=self.command), \
+             patch.object(session, "report_progress", side_effect=lambda *args: self.progress_reports.append(args)):
             return session.exchange(prompt=self.paths[0], cli=self.paths[1], model=self.paths[2], **options)
 
     def test_playback_finishes_before_recording_and_inference(self):
@@ -139,6 +143,95 @@ session.main()
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
+
+    def remote_result(self, **values):
+        return dict(status="ok", request_id="observation-one", text="도와주세요.",
+                    classification="도움 필요", transcribe_seconds=0.1, **values)
+
+    def remote(self, **options):
+        return self.exchange(server_url="http://voice.test:8000", request_id="observation-one",
+                             expires_at=time.time()+60, **options)
+
+    def test_remote_plays_and_records_once_without_a_pi_model_or_inference(self):
+        self.paths[1].unlink(); self.paths[2].unlink()
+        def response(request, timeout):
+            self.assertEqual([Path(c[0]).name for c in self.calls], ["mpg123", "arecord"])
+            self.assertEqual(request.full_url, "http://voice.test:8000/voice/transcribe")
+            self.assertIn(b'observation-one', request.data)
+            return io.BytesIO(json.dumps(self.remote_result()).encode())
+        with patch.object(session, "urlopen", side_effect=response):
+            result = self.remote()
+        self.assertEqual(result["classification"], "도움 필요")
+        self.assertFalse(Path(self.calls[1][-1]).exists())
+
+    def test_upload_retries_identical_recording_and_request_without_replaying(self):
+        bodies = []
+        def response(request, timeout):
+            bodies.append(request.data)
+            if len(bodies) == 1:
+                raise URLError("response lost")
+            return io.BytesIO(json.dumps(self.remote_result()).encode())
+        with patch.object(session, "urlopen", side_effect=response), patch.object(session.time, "sleep"):
+            self.assertEqual(self.remote()["status"], "ok")
+        self.assertEqual(bodies[0], bodies[1])
+        self.assertEqual(len(self.calls), 2)
+
+    def test_server_failure_does_not_fall_back_to_pi_inference(self):
+        with patch.object(session, "urlopen", side_effect=URLError("offline")), patch.object(session.time, "sleep"):
+            result = self.remote()
+        self.assertEqual((result["status"], result["stage"], result["classification"]),
+                         ("error", "upload", "확인 필요"))
+        self.assertEqual(len(self.calls), 2)
+        self.assertFalse(Path(self.calls[1][-1]).exists())
+
+    def test_invalid_remote_url_and_expired_requests_stop_before_playback(self):
+        result = self.exchange(server_url="file:///tmp/voice")
+        self.assertEqual(result["stage"], "preparation")
+        result = self.exchange(server_url="http://voice.test", expires_at=time.time()-1)
+        self.assertEqual(result["stage"], "preparation")
+        self.assertEqual(self.calls, [])
+
+    def test_mismatched_server_request_id_is_not_a_success(self):
+        result = self.remote_result()
+        result["request_id"] = "another-observation"
+        with patch.object(session, "urlopen", return_value=io.BytesIO(json.dumps(result).encode())):
+            output = self.remote()
+        self.assertEqual((output["status"], output["classification"]), ("error", "확인 필요"))
+
+    def test_remote_inference_error_keeps_its_stage_and_requires_confirmation(self):
+        result = dict(status="error", request_id="observation-one", stage="recognition", message="timeout")
+        with patch.object(session, "urlopen", return_value=io.BytesIO(json.dumps(result).encode())):
+            output = self.remote()
+        self.assertEqual((output["stage"], output["classification"]), ("recognition", "확인 필요"))
+
+    def test_cancel_during_upload_removes_temporary_wav(self):
+        with patch.object(session, "upload_audio", side_effect=SystemExit(130)), self.assertRaises(SystemExit):
+            self.remote()
+        self.assertFalse(Path(self.calls[1][-1]).exists())
+        self.assertEqual(self.progress_reports[-1][-1], "cancelled")
+
+    def test_remote_progress_reports_order_and_same_observation(self):
+        with patch.object(session, "urlopen", return_value=io.BytesIO(json.dumps(self.remote_result()).encode())):
+            self.remote()
+        self.assertEqual([r[-1] for r in self.progress_reports], ["playback", "recording", "upload"])
+        self.assertEqual({r[1] for r in self.progress_reports}, {"observation-one"})
+        self.assertEqual(len({r[2] for r in self.progress_reports}), 1)
+
+    def test_progress_transport_failure_does_not_interrupt_audio_or_cleanup(self):
+        with patch.object(session, "urlopen", side_effect=URLError("offline")):
+            session.report_progress("http://voice.test/voice/transcribe", "one", time.time()+60, "recording")
+
+    def test_long_contradictory_transcript_is_classified_before_output_truncation(self):
+        original = self.command
+        def command(args, timeout):
+            result = original(args, timeout)
+            if args[0] != "arecord":
+                result.stdout = "도와주세요" + " "*2100 + "라고 한 건 아니에요"
+            return result
+        self.command = command
+        result = self.exchange()
+        self.assertEqual(result["classification"], "확인 필요")
+        self.assertLessEqual(len(result["text"]), 2000)
 
 
 if __name__ == "__main__":

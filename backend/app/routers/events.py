@@ -7,12 +7,29 @@ from sqlalchemy.orm import Session
 from app.activity import record
 from app.config import SNAPSHOT_DIR
 from app.database import get_db
-from app.models import Event, EventSnapshot, EventStatus, SnapshotKind, utcnow
-from app.schemas import EventRead, EventUpdate
+from app.models import ActivityLog, Event, EventSnapshot, EventStatus, SnapshotKind, utcnow
+from app.schemas import AlarmState, EventAlarmRead, EventRead, EventUpdate
+from app.voice_records import bind_voice
 
 router = APIRouter(prefix="/events", tags=["events"])
 
 SNAPSHOT_EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png"}
+ALARM_STATUSES = (EventStatus.CONFIRMED, EventStatus.UNCERTAIN)
+ALARM_PRESENTED = "event_alarm_presented"
+ALARM_MUTED = "event_alarm_muted"
+
+
+def alarm_recorded(db: Session, event_id: int, kind: str) -> bool:
+    return db.scalar(select(ActivityLog.id).where(
+        ActivityLog.event_id == event_id, ActivityLog.kind == kind
+    ).limit(1)) is not None
+
+
+def alarm_state(db: Session, event: Event) -> dict:
+    presented = alarm_recorded(db, event.id, ALARM_PRESENTED)
+    muted = alarm_recorded(db, event.id, ALARM_MUTED)
+    return dict(event_id=event.id, presented=presented, muted=muted,
+                active=event.status in ALARM_STATUSES and presented and not muted)
 
 
 def apply_status(event: Event, status: EventStatus) -> None:
@@ -53,6 +70,7 @@ async def create_event(
     status: EventStatus = Form(EventStatus.OBSERVING),
     detected_snapshot: UploadFile | None = File(None),
     observing_snapshot: UploadFile | None = File(None),
+    voice_request_id: str | None = Form(None),
     db: Session = Depends(get_db),
 ) -> Event:
     event = Event(x=x, y=y, confidence=confidence)
@@ -62,6 +80,8 @@ async def create_event(
             await attach_snapshot(event, kind, upload)
     db.add(event)
     db.flush()
+    if voice_request_id:
+        bind_voice(db, voice_request_id, event.id)
     record(
         db,
         "event_created",
@@ -87,6 +107,39 @@ def list_events(
     if status:
         stmt = stmt.where(Event.status.in_(status))
     return list(db.scalars(stmt.limit(limit).offset(offset)))
+
+
+@router.get("/alarms", response_model=AlarmState)
+def list_alarms(db: Session = Depends(get_db)) -> dict:
+    # Query all pending events, independently of the dashboard's list limit.
+    pending = select(Event.id).where(Event.status.in_(ALARM_STATUSES))
+    rows = db.execute(select(ActivityLog.event_id, ActivityLog.kind).where(
+        ActivityLog.event_id.in_(pending),
+        ActivityLog.kind.in_((ALARM_PRESENTED, ALARM_MUTED)),
+    ))
+    presented, muted = set(), set()
+    for event_id, kind in rows:
+        (presented if kind == ALARM_PRESENTED else muted).add(event_id)
+    return dict(active_event_ids=sorted(presented - muted),
+                presented_event_ids=sorted(presented), muted_event_ids=sorted(muted))
+
+
+@router.post("/{event_id}/alarm/presented", response_model=EventAlarmRead)
+def present_alarm(event_id: int, db: Session = Depends(get_db)) -> dict:
+    event = get_event_or_404(db, event_id)
+    if event.status in ALARM_STATUSES and not alarm_recorded(db, event_id, ALARM_PRESENTED):
+        record(db, ALARM_PRESENTED, event_id)
+        db.commit()
+    return alarm_state(db, event)
+
+
+@router.post("/{event_id}/alarm/mute", response_model=EventAlarmRead)
+def mute_alarm(event_id: int, db: Session = Depends(get_db)) -> dict:
+    event = get_event_or_404(db, event_id)
+    if event.status in ALARM_STATUSES and not alarm_recorded(db, event_id, ALARM_MUTED):
+        record(db, ALARM_MUTED, event_id)
+        db.commit()
+    return alarm_state(db, event)
 
 
 @router.get("/{event_id}", response_model=EventRead)

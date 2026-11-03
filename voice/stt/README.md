@@ -3,6 +3,8 @@
 기본 입력 마이크로 5초를 녹음하고 한국어 인식 문장, 등록 표현 분류, 처리 시간을 출력한다.
 ROS2·Arduino·서버 연결 없이 로컬 CPU에서 실행한다. 기본 모델은 다국어 `base`다.
 
+이 문서는 기존 `record_korean.py`의 개인 개발용 실행 안내다. Pi의 재생·녹음을 유지하고 인식·분류를 서버 PC의 `whisper.cpp`로 보내는 실행은 [순찰·Pi 음성 연결 안내](../../src/my_bot_fall/README.md)를 따른다. `whisper_session.py`에 `--server-url`을 지정하면 원격 모드이며 Pi에 Whisper 모델·실행 파일이 필요하지 않다.
+
 ## 실행 전제
 
 환경 생성·설치·활성화·의존성 확인은 [프로젝트 README의 개인 개발 환경](../../README.md#개인-개발-환경-python-310)을 따른다.

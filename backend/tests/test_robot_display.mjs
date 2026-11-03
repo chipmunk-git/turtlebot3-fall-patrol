@@ -33,6 +33,9 @@ export async function runChecks() {
   function element() {
     const classes = new Set();
     return { className: '', textContent: '', innerHTML: '', dataset: {}, style: {}, attributes: {},
+      pauseCount: 0, loadCount: 0,
+      pause() { this.pauseCount++; }, load() { this.loadCount++; },
+      removeAttribute(name) { delete this[name]; delete this.attributes[name]; },
       lastElementChild: { textContent: '' },
       classList: { toggle(name, enabled) { enabled ? classes.add(name) : classes.delete(name); },
                    add(name) { classes.add(name); }, remove(name) { classes.delete(name); },
@@ -51,12 +54,19 @@ export async function runChecks() {
   const handlers = {};
   const requests = [];
   const alerts = [];
+  const frames = [];
+  let popupRect = {top: 10, left: 10, bottom: 200, right: 500, width: 490, height: 190};
   let respond;
   const documentElement = {dataset: {}};
   const context = vm.createContext({
-    document: { documentElement, querySelector: query,
+    document: { documentElement, visibilityState: 'visible', querySelector: query,
       addEventListener: (name, fn) => { handlers[name] = fn; },
-      querySelectorAll: selector => selector === '#robot-steps li' ? steps : [] },
+      querySelectorAll: selector => selector === '#robot-steps li' ? steps
+        : selector === '[data-alarm-event]'
+          ? [...query('#toasts').innerHTML.matchAll(/data-alarm-event="(\d+)"/g)].map(match =>
+              ({dataset: {alarmEvent: match[1]}, getBoundingClientRect: () => popupRect}))
+          : [] },
+    window: {innerWidth: 1280, innerHeight: 800},
     getComputedStyle: () => ({ getPropertyValue: name => variables[name] || '' }),
     performance: { now: () => 1000 },
     fetch: (url, options) => {
@@ -64,7 +74,7 @@ export async function runChecks() {
       return respond ? respond(url, options) : new Promise(() => {});
     },
     alert: message => alerts.push(message),
-    setInterval() {}, setTimeout() {}, requestAnimationFrame() {},
+    setInterval() {}, setTimeout() {}, requestAnimationFrame: fn => frames.push(fn),
     ResizeObserver: class { observe() {} },
     location: {hostname: 'localhost', protocol: 'http:'},
     localStorage: {setItem() {}},
@@ -74,9 +84,11 @@ export async function runChecks() {
     globalThis.displayTest = {state, renderRobot, robotSubtitle, formatLog, badge,
       actionButtons, ROBOT_STEPS, ROBOT_STATE_LABELS, STATUS_LABELS, ACTIONS_BY_STATUS,
       renderToasts, renderRows, toPixel, mapViewSize, visibleMapEvents, applyTheme,
-      pollControl, sendDrive};
+      pollControl, sendDrive, scheduleVisibleAlarms, pollAlarms, muteEventAlarm, alarmButton,
+      renderVoice, pollDetailVoice};
   `, context);
   const api = context.displayTest;
+  frames.length = 0; // Do not run the unrelated map animation startup.
   const results = [];
   function check(name, fn) { fn(); results.push(name); }
   async function checkAsync(name, fn) { await fn(); results.push(name); }
@@ -166,7 +178,7 @@ export async function runChecks() {
     assert.equal(declarations('.badge-observing')['--tone'], 'var(--active)');
   });
   check('complete dashboard startup includes control polling and matching drive buttons', () => {
-    assert.deepEqual(requests, ['/status', '/events?limit=200', '/logs?after=0&limit=200', '/control', '/map']);
+    assert.deepEqual(requests, ['/status', '/events?limit=200', '/logs?after=0&limit=200', '/control', '/events/alarms', '/map']);
     assert.deepEqual([...html.matchAll(/data-drive="([^"]+)"/g)].map(match => match[1]), ['run', 'stop']);
     assert.match(html, /aria-label="주행 제어"/);
     assert.match(source, /sendDrive\(driveButton.dataset.drive\)/);
@@ -259,6 +271,200 @@ export async function runChecks() {
     assert.equal(JSON.stringify({robot: api.state.robot, events: api.state.events}), before);
     assert.match(css, /:root\[data-theme="light"\]/);
     assert.match(css, /\.toasts\s*\{/);
+  });
+  function paintFrame() {
+    frames.splice(0).forEach(fn => fn(1000));
+  }
+  async function settle() {
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+  }
+  function resetAlarms() {
+    frames.length = 0;
+    requests.length = 0;
+    api.state.presentedAlarms.clear();
+    api.state.presentingAlarms.clear();
+    api.state.mutedAlarms.clear();
+    api.state.mutingAlarms.clear();
+    api.state.dismissedToasts.clear();
+    api.state.alarmReady = true;
+    context.document.visibilityState = 'visible';
+    popupRect = {top: 10, left: 10, bottom: 200, right: 500, width: 490, height: 190};
+    api.state.events = [event(7, 'confirmed', '2026-10-31T01:00:00Z'),
+      event(8, 'uncertain', '2026-10-31T01:01:00Z')];
+  }
+  await checkAsync('only the painted popup is reported, not an event waiting behind it', async () => {
+    resetAlarms();
+    respond = async () => ({ok: true, json: async () => ({})});
+    api.renderToasts();
+    assert.deepEqual(requests, []);
+    paintFrame();
+    assert.deepEqual(requests, []);
+    paintFrame();
+    await settle();
+    assert.deepEqual(requests, ['/events/7/alarm/presented']);
+    api.scheduleVisibleAlarms();
+    paintFrame(); paintFrame(); await settle();
+    assert.equal(requests.length, 1);
+  });
+  await checkAsync('hidden tabs wait until the popup is visible to start an alarm', async () => {
+    resetAlarms();
+    respond = async () => ({ok: true, json: async () => ({})});
+    context.document.visibilityState = 'hidden';
+    api.renderToasts();
+    paintFrame(); paintFrame(); await settle();
+    assert.deepEqual(requests, []);
+    context.document.visibilityState = 'visible';
+    handlers.visibilitychange();
+    paintFrame(); paintFrame(); await settle();
+    assert.deepEqual(requests, ['/events/7/alarm/presented']);
+  });
+  await checkAsync('offscreen, removed and already resolved popups are not reported', async () => {
+    for (const condition of ['offscreen', 'removed', 'resolved']) {
+      resetAlarms();
+      api.renderToasts();
+      if (condition === 'offscreen') popupRect = {...popupRect, top: 900, bottom: 1000};
+      if (condition === 'removed') query('#toasts').innerHTML = '';
+      if (condition === 'resolved') api.state.events[0].status = 'resolved';
+      paintFrame(); paintFrame(); await settle();
+      assert.deepEqual(requests, [], condition);
+    }
+  });
+  await checkAsync('failed presentation reports retry while visible without permanently marking success', async () => {
+    resetAlarms();
+    respond = async () => ({ok: false, status: 503});
+    api.renderToasts();
+    paintFrame(); paintFrame(); await settle();
+    assert.equal(api.state.presentedAlarms.has(7), false);
+    assert.equal(api.state.presentingAlarms.has(7), false);
+    respond = async () => ({ok: true, json: async () => ({})});
+    api.scheduleVisibleAlarms();
+    paintFrame(); paintFrame(); await settle();
+    assert.equal(api.state.presentedAlarms.has(7), true);
+    assert.equal(requests.length, 2);
+  });
+  await checkAsync('detail mute targets only one event and preserves status, notes and drive state', async () => {
+    resetAlarms();
+    const before = JSON.stringify({events: api.state.events, robot: api.state.robot, control: api.state.control});
+    respond = async (url, options) => {
+      assert.equal(url, '/events/7/alarm/mute');
+      assert.equal(options.method, 'POST');
+      return {ok: true, json: async () => ({event_id: 7, muted: true, active: false})};
+    };
+    await handlers.click({target: {closest: selector => selector === '[data-mute-alarm]'
+      ? {dataset: {muteAlarm: '7'}} : null}});
+    assert.deepEqual(Array.from(api.state.mutedAlarms), [7]);
+    assert.match(api.alarmButton(api.state.events[0]), /disabled.*이 사건 경보음 꺼짐/);
+    assert.doesNotMatch(api.alarmButton(api.state.events[1]), /disabled/);
+    assert.equal(api.alarmButton({id: 9, status: 'resolved'}), '');
+    assert.equal(JSON.stringify({events: api.state.events, robot: api.state.robot, control: api.state.control}), before);
+    assert.match(source, /actionButtons\(event\) \+ alarmButton\(event\)/);
+  });
+  await checkAsync('failed mute is visible and does not claim the event was silenced', async () => {
+    resetAlarms();
+    respond = async () => ({ok: false, status: 503});
+    await api.muteEventAlarm(7);
+    assert.equal(api.state.mutedAlarms.has(7), false);
+    assert.equal(api.state.mutingAlarms.has(7), false);
+    assert.match(alerts.at(-1), /경보음 끄기 실패/);
+    assert.doesNotMatch(api.alarmButton(api.state.events[0]), /disabled/);
+  });
+  await checkAsync('a stale alarm poll cannot undo a newly confirmed mute', async () => {
+    resetAlarms();
+    let finish;
+    respond = () => new Promise(resolve => { finish = resolve; });
+    const polling = api.pollAlarms();
+    respond = async () => ({ok: true, json: async () => ({muted: true})});
+    await api.muteEventAlarm(7);
+    finish({ok: true, json: async () => ({presented_event_ids: [7], muted_event_ids: [], active_event_ids: [7]})});
+    await polling;
+    assert.equal(api.state.mutedAlarms.has(7), true);
+  });
+  await checkAsync('shared server mute state survives another browser and allows new events', async () => {
+    resetAlarms();
+    respond = async () => ({ok: true, json: async () =>
+      ({presented_event_ids: [7], muted_event_ids: [7], active_event_ids: []})});
+    await api.pollAlarms();
+    assert.match(api.alarmButton(api.state.events[0]), /이 사건 경보음 꺼짐/);
+    assert.doesNotMatch(api.alarmButton(api.state.events[1]), /disabled/);
+    assert.match(api.formatLog({kind: 'event_alarm_muted', event_id: 7, detail: {}}).message, /경보음 끄기/);
+  });
+  check('voice panel shows progress and final text separately from administrator notes', () => {
+    query('#detail-note').value = '관리자가 작성 중인 메모';
+    for (const [phase, label] of Object.entries({pending: '요청 대기', playback: '안내 재생 중',
+      recording: '녹음 중', upload: '전송 중', recognition: '인식 중', completed: '인식 완료',
+      failed: '처리 실패', cancelled: '취소됨'})) {
+      api.renderVoice({phase, text: null, classification: null, audio_url: null});
+      assert.equal(query('#voice-progress').textContent, label);
+    }
+    api.renderVoice({phase: 'completed', text: '<script>test</script>', classification: '도움 필요'});
+    assert.equal(query('#voice-text').textContent, '<script>test</script>');
+    assert.equal(query('#voice-text').innerHTML, '');
+    assert.equal(query('#voice-classification').textContent, '도움 필요');
+    assert.equal(query('#detail-note').value, '관리자가 작성 중인 메모');
+    assert.match(html, /<audio[^>]*controls[^>]*preload="none"/);
+    assert.doesNotMatch(html, /<audio[^>]*autoplay/);
+  });
+  check('voice polling preserves active playback until another recording is selected', () => {
+    const audio = query('#voice-audio');
+    api.renderVoice({phase: 'recognition', audio_url: '/voice/one/audio'});
+    const loads = audio.loadCount, pauses = audio.pauseCount;
+    api.renderVoice({phase: 'completed', audio_url: '/voice/one/audio', text: '괜찮아요', classification: '도움 불필요'});
+    assert.equal(audio.loadCount, loads);
+    assert.equal(audio.pauseCount, pauses);
+    api.renderVoice({phase: 'completed', audio_url: '/voice/two/audio'});
+    assert.equal(audio.loadCount, loads+1);
+    assert.equal(audio.pauseCount, pauses+1);
+    api.renderVoice(null);
+    assert.equal(audio.hidden, true);
+    assert.equal(audio.src, undefined);
+  });
+  await checkAsync('voice status arrives asynchronously without altering event color or notes', async () => {
+    const before = JSON.stringify(api.state.events);
+    api.state.selectedId = 7;
+    query('#detail').open = true;
+    respond = async url => {
+      assert.equal(url, '/voice/events/7');
+      return {ok: true, json: async () => ({phase: 'completed', text: '도와주세요', classification: '도움 필요'})};
+    };
+    await api.pollDetailVoice();
+    assert.equal(query('#voice-text').textContent, '도와주세요');
+    assert.equal(JSON.stringify(api.state.events), before);
+    assert.equal(query('#detail-note').value, '관리자가 작성 중인 메모');
+  });
+  await checkAsync('late responses from a previous detail cannot replace the current voice', async () => {
+    let finish;
+    api.state.selectedId = 7;
+    respond = () => new Promise(resolve => { finish = resolve; });
+    const old = api.pollDetailVoice();
+    api.state.selectedId = 8;
+    respond = async () => ({ok: true, json: async () => ({phase: 'recording', text: null})});
+    await api.pollDetailVoice();
+    finish({ok: true, json: async () => ({phase: 'completed', text: '옛 사건 문장'})});
+    await old;
+    assert.equal(query('#voice-progress').textContent, '녹음 중');
+    assert.notEqual(query('#voice-text').textContent, '옛 사건 문장');
+  });
+  await checkAsync('closed detail does not fetch or display a late voice response', async () => {
+    query('#detail').open = false;
+    const count = requests.length;
+    await api.pollDetailVoice();
+    assert.equal(requests.length, count);
+    query('#detail').open = true;
+    let finish;
+    respond = () => new Promise(resolve => { finish = resolve; });
+    const request = api.pollDetailVoice();
+    query('#detail').open = false;
+    finish({ok: true, json: async () => ({phase: 'completed', text: '닫힌 창 문장'})});
+    await request;
+    assert.notEqual(query('#voice-text').textContent, '닫힌 창 문장');
+  });
+  await checkAsync('voice transport failure is shown without clearing existing notes', async () => {
+    query('#detail').open = true;
+    respond = async () => ({ok: false, status: 503});
+    await api.pollDetailVoice();
+    assert.equal(query('#voice-progress').textContent, '음성 정보 연결 대기');
+    assert.equal(query('#detail-note').value, '관리자가 작성 중인 메모');
+    query('#detail').open = false;
   });
   return results;
 }

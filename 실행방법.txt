@@ -55,10 +55,30 @@ pkill -f web_video_server
 다른 기기:  http://SERVER_IP:8000 (SERVER_IP를 Ubuntu 서버 PC의 실제 주소로 변경)
 
 
+[4] Ubuntu Desktop 서버 PC 별도 터미널: 실기 순찰용 위치 추정
+----------------------------------------
+실제 순찰을 함께 실행할 때 사용한다. my_bot_fall을 먼저 빌드하고,
+src/maps/new_map.yaml과 new_map.pgm을 이 PC의 같은 폴더에 함께 둔다.
+빌드와 자세·순찰·Pi 음성 실행의 전체 순서는 src/my_bot_fall/README.md를 참고한다.
+기존 지도 서버·AMCL 또는 SLAM이 실행 중이면 중복 실행하지 않는다.
+
+cd ~/robotech/project_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch my_bot_fall tb3_localization_real.launch.py \
+  map:="$PWD/src/maps/new_map.yaml" \
+  use_sim_time:=false
+
+map 인자는 필수이며 다른 작업 경로에서는 실제 YAML의 절대 경로를 지정한다.
+src/maps/는 colcon 설치 대상이 아니다. backend/maps/는 웹 표시용 가공 지도다.
+RViz에서 2D Pose Estimate로 실제 초기 위치·방향을 맞춘 뒤 자세·순찰 노드를 실행한다.
+끄기: Ctrl+C (위치 추정·RViz 종료)
+
+
 참고
 ----------------------------------------
 - 로봇과 PC의 ROS_DOMAIN_ID가 같아야 함 (지금 33). 확인: echo $ROS_DOMAIN_ID
-- 순서는 상관없음. 대시보드는 영상이 끊기면 5초마다 다시 연결함
+- 카메라·대시보드는 실행 순서와 무관하게 연결됨. 대시보드는 영상이 끊기면 5초마다 다시 연결함
 - 영상이 안 나오면 대시보드에서 F5 (안 되면 Ctrl+Shift+R)
 - localhost:8080에서 /image_raw 원본 토픽을 누르지 말 것 (와이파이가 꽉 차서 영상이 멈춤)
 - "주소가 이미 사용 중(address already in use)" 에러가 나면 이미 떠 있는 것:

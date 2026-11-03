@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from app import models
 from app.config import MAP_DIR, SNAPSHOT_DIR, STATIC_DIR
 from app.database import engine
-from app.routers import control, events, ignore_zones, logs, map, status
+from app.routers import control, events, ignore_zones, logs, map, status, voice
 
 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 MAP_DIR.mkdir(parents=True, exist_ok=True)
@@ -44,6 +44,7 @@ app.include_router(status.router)
 app.include_router(map.router)
 app.include_router(logs.router)
 app.include_router(control.router)
+app.include_router(voice.router)
 
 
 @app.get("/health", tags=["health"])

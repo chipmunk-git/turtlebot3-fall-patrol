@@ -297,3 +297,6 @@ GitHub.sublime-settings
 /mcu/stm32/**/.settings/com.st.stm32cube.ide.mcu.sfrview.prefs
 /mcu/stm32/**/.settings/stm32cubeide.project.prefs
 /mcu/stm32/**/.settings/language.settings.xml
+
+# Runtime voice recordings (patient audio; never commit)
+/voice/recordings/

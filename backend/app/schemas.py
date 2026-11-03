@@ -43,6 +43,19 @@ class EventUpdate(BaseModel):
     note: str | None = None
 
 
+class EventAlarmRead(BaseModel):
+    event_id: int
+    presented: bool
+    muted: bool
+    active: bool
+
+
+class AlarmState(BaseModel):
+    active_event_ids: list[int]
+    presented_event_ids: list[int]
+    muted_event_ids: list[int]
+
+
 class IgnoreCheck(BaseModel):
     ignored: bool
     event_id: int | None = None

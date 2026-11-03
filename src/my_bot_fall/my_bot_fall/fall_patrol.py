@@ -215,6 +215,8 @@ class FallPatrol(AStarDriver):
         with self.command_lock:
             if self.logic.phase in ('observe', 'alert') and self.voice.accept(data, time.time()):
                 self.sync_voice()
+                if data.get('action') == 'alert' and data['status'] == 'error':
+                    self.get_logger().warn('경고 음성 재생 실패: ' + str(data.get('message', ''))[:300])
 
     def clear_observation_image(self):
         self.observation_annotation = None
@@ -637,6 +639,8 @@ class FallPatrol(AStarDriver):
     def post_incident(self, incident):
         boundary = uuid.uuid4().hex
         fields = {'status':incident['result'], 'x':incident['x'], 'y':incident['y']}
+        if incident.get('voice_request_id'):
+            fields['voice_request_id'] = incident['voice_request_id']
         body = b''
         for name, value in fields.items():
             if value is not None:
@@ -737,6 +741,14 @@ class FallPatrol(AStarDriver):
             manually_cleared = (event_status in ('resolved', 'false_alarm') or
                                 (event_status == 'acknowledged' and
                                  bool(event.get('acknowledged_at'))))
+            with self.command_lock:
+                if (self.incident is incident and self.voice_enabled and self.logic.phase == 'alert'
+                        and self.voice.request
+                        and incident.get('voice_request_id') == self.voice.request['request_id']):
+                    if event_status in ('confirmed', 'uncertain'):
+                        self.voice.queue_alert(incident['event_id'], time.time())
+                    elif manually_cleared:
+                        self.voice.end()
             if manually_cleared:
                 with self.command_lock:
                     if self.incident is incident:

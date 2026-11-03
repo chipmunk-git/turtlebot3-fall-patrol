@@ -91,6 +91,13 @@ const state = {
   control: null,
   dismissedToasts: new Set(),
   shownToasts: new Set(),
+  presentedAlarms: new Set(),
+  presentingAlarms: new Set(),
+  mutedAlarms: new Set(),
+  mutingAlarms: new Set(),
+  alarmReady: false,
+  alarmRevision: 0,
+  voicePending: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -330,7 +337,7 @@ function renderToasts() {
           ? `<img class="toast-thumb" src="${event.snapshot_url}" alt="">`
           : `<span class="toast-thumb"></span>`;
         return `
-        <section class="toast toast-${event.status}${fresh}" role="alert">
+        <section class="toast toast-${event.status}${fresh}" role="alert" data-alarm-event="${event.id}">
           <header class="toast-head">
             <span class="toast-pulse"></span>
             <span class="toast-heading"></span>
@@ -353,6 +360,72 @@ function renderToasts() {
   renderToastAge();
   $(".events-card").classList.toggle("has-alerts", alerts.length > 0);
   document.title = alerts.length ? `(${alerts.length}) 낙상 의심 감지` : "낙상 의심 감지";
+  scheduleVisibleAlarms();
+}
+
+
+function scheduleVisibleAlarms() {
+  // A second animation frame lets the popup paint before notifying the server.
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (document.visibilityState !== "visible") return;
+    for (const toast of document.querySelectorAll("[data-alarm-event]")) {
+      const rect = toast.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0 || rect.bottom <= 0 || rect.right <= 0
+          || rect.top >= window.innerHeight || rect.left >= window.innerWidth) continue;
+      const id = Number(toast.dataset.alarmEvent);
+      if (!state.events.some(event => event.id === id && ALERT_STATUSES.has(event.status))
+          || state.presentedAlarms.has(id) || state.presentingAlarms.has(id)) continue;
+      state.presentingAlarms.add(id);
+      api(`/events/${id}/alarm/presented`, {method: "POST"})
+        .then(() => state.presentedAlarms.add(id))
+        .catch(() => {}) // Retry on the next poll while the popup is visible.
+        .finally(() => state.presentingAlarms.delete(id));
+    }
+  }));
+}
+
+async function pollAlarms() {
+  const revision = state.alarmRevision;
+  try {
+    const result = await api("/events/alarms");
+    if (revision !== state.alarmRevision) return;
+    const changed = !state.alarmReady || result.muted_event_ids.length !== state.mutedAlarms.size
+      || result.muted_event_ids.some(id => !state.mutedAlarms.has(id));
+    state.presentedAlarms = new Set(result.presented_event_ids);
+    state.mutedAlarms = new Set(result.muted_event_ids);
+    state.alarmReady = true;
+    if (changed) renderDetail();
+  } catch {
+    // Keep the last confirmed per-event state; the relay independently fails off.
+  } finally {
+    scheduleVisibleAlarms();
+  }
+}
+
+function alarmButton(event) {
+  if (!ALERT_STATUSES.has(event.status)) return "";
+  const muted = state.mutedAlarms.has(event.id);
+  const busy = state.mutingAlarms.has(event.id);
+  const label = muted ? "이 사건 경보음 꺼짐" : busy ? "끄는 중…"
+    : state.alarmReady ? "이 사건 경보음 끄기" : "경보음 상태 확인 중…";
+  return `<button class="btn btn-ghost" data-mute-alarm="${event.id}"${muted || busy || !state.alarmReady ? " disabled" : ""}>${label}</button>`;
+}
+
+async function muteEventAlarm(id) {
+  if (state.mutingAlarms.has(id)) return;
+  state.mutingAlarms.add(id);
+  state.alarmRevision++;
+  renderDetail();
+  try {
+    const result = await api(`/events/${id}/alarm/mute`, {method: "POST"});
+    if (result.muted) state.mutedAlarms.add(id);
+  } catch (error) {
+    alert(`경보음 끄기 실패: ${error.message}`);
+  } finally {
+    state.alarmRevision++;
+    state.mutingAlarms.delete(id);
+    renderDetail();
+  }
 }
 
 // 팝업의 경과 시간은 알림 내용이 그대로여도 매초 갱신한다
@@ -440,8 +513,54 @@ function renderDetail() {
       <span class="eyebrow">History</span>
       <ol id="detail-history" class="history-list"><li class="history-empty">불러오는 중…</li></ol>
     </div>`;
-  $("#detail-actions").innerHTML = actionButtons(event);
+  $("#detail-actions").innerHTML = actionButtons(event) + alarmButton(event);
   loadHistory(event.id);
+  pollDetailVoice();
+}
+
+
+const VOICE_PHASE_LABELS = {
+  pending: "요청 대기", playback: "안내 재생 중", recording: "녹음 중",
+  upload: "전송 중", recognition: "인식 중", completed: "인식 완료",
+  failed: "처리 실패", cancelled: "취소됨",
+};
+
+function renderVoice(record) {
+  $("#voice-progress").textContent = record ? VOICE_PHASE_LABELS[record.phase] ?? "상태 확인 중" : "음성 요청 없음";
+  $("#voice-text").textContent = record?.text ? record.text
+    : record?.phase === "completed" ? "(인식된 문장 없음)" : "아직 결과가 없습니다.";
+  $("#voice-classification").textContent = record?.classification ?? "—";
+  $("#voice-message").textContent = record?.message ?? "";
+  const audio = $("#voice-audio");
+  const url = record?.audio_url ?? "";
+  if ((audio.dataset.source ?? "") !== url) {
+    audio.pause();
+    if (url) audio.src = url;
+    else audio.removeAttribute("src");
+    audio.dataset.source = url;
+    audio.load();
+  }
+  audio.hidden = !url;
+  $("#voice-audio-empty").hidden = !!url;
+  $("#voice-audio-empty").textContent = record && ["pending", "playback", "recording", "upload"].includes(record.phase)
+    ? "녹음 수신 대기" : "재생할 녹음이 없습니다.";
+}
+
+async function pollDetailVoice() {
+  const id = state.selectedId;
+  if (!detailDialog.open || id === null || state.voicePending?.id === id) return;
+  const pending = {id};
+  state.voicePending = pending;
+  try {
+    const record = await api(`/voice/events/${id}`);
+    if (detailDialog.open && state.selectedId === id && state.voicePending === pending) renderVoice(record);
+  } catch {
+    if (detailDialog.open && state.selectedId === id && state.voicePending === pending) {
+      $("#voice-progress").textContent = "음성 정보 연결 대기";
+    }
+  } finally {
+    if (state.voicePending === pending) state.voicePending = null;
+  }
 }
 
 async function loadHistory(eventId) {
@@ -464,7 +583,11 @@ async function loadHistory(eventId) {
 }
 
 function openDetail(id) {
-  if (state.selectedId !== id) state.detailPhoto = null;
+  if (state.selectedId !== id) {
+    state.detailPhoto = null;
+    renderVoice(null);
+    $("#voice-progress").textContent = "확인 중…";
+  }
   state.selectedId = id;
   const event = selectedEvent();
   if (!event) return;
@@ -833,6 +956,10 @@ function formatLog(entry) {
         : { tag: "DRIVE", tone: "alert", message: "웹에서 주행 정지 명령" };
     case "event_note":
       return { tag: "NOTE", tone: "check", message: d.note ? `이벤트 #${id} 메모 · "${d.note}"` : `이벤트 #${id} 메모 삭제` };
+    case "event_alarm_presented":
+      return { tag: "ALARM", tone: "alert", message: `이벤트 #${id} 팝업 표시 · 부저 경보 대상 등록` };
+    case "event_alarm_muted":
+      return { tag: "ALARM", tone: "check", message: `이벤트 #${id} 경보음 끄기` };
     default:
       return { tag: entry.kind.toUpperCase(), tone: "check", message: JSON.stringify(d) };
   }
@@ -876,6 +1003,11 @@ async function pollLogs() {
 }
 
 document.addEventListener("click", async (e) => {
+  const muteButton = e.target.closest("[data-mute-alarm]");
+  if (muteButton) {
+    await muteEventAlarm(Number(muteButton.dataset.muteAlarm));
+    return;
+  }
   const actionButton = e.target.closest("[data-action]");
   if (actionButton) {
     e.stopPropagation();
@@ -936,6 +1068,9 @@ $("#note-save").addEventListener("click", async () => {
 detailDialog.addEventListener("click", (e) => {
   if (e.target === detailDialog) detailDialog.close();
 });
+detailDialog.addEventListener("close", () => $("#voice-audio").pause());
+
+document.addEventListener("visibilitychange", scheduleVisibleAlarms);
 
 canvas.addEventListener("click", (e) => {
   const event = eventAtCanvasPoint(e.clientX, e.clientY);
@@ -974,10 +1109,12 @@ renderClock();
 setInterval(renderClock, 1000);
 setInterval(renderToastAge, 1000);
 setInterval(renderRobotAge, 200);
+setInterval(pollDetailVoice, 1000);
 poll(pollStatus, CONFIG.statusIntervalMs);
 poll(pollEvents, CONFIG.eventsIntervalMs);
 poll(pollLogs, CONFIG.logsIntervalMs);
 poll(pollControl, CONFIG.controlIntervalMs);
+poll(pollAlarms, 1000);
 loadMap();
 startVideo();
 requestAnimationFrame(drawMap);
