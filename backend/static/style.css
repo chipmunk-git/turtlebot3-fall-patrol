@@ -665,29 +665,6 @@ h2 { font-size: 15px; letter-spacing: -0.015em; }
   border: 1px solid var(--line);
   background: var(--screen);
 }
-.shots { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: -4px 0 18px; }
-.shot {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 6px;
-  border-radius: 12px;
-  border: 1px solid var(--line);
-  background: var(--surface);
-  color: var(--muted);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition: border-color 0.2s var(--ease), background 0.2s var(--ease);
-}
-.shot img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 8px; display: block; opacity: 0.75; transition: opacity 0.2s var(--ease); }
-.shot span { font-size: 11.5px; color: var(--text); padding: 0 2px; }
-.shot em { font-style: normal; font-family: var(--mono); font-size: 10.5px; color: var(--faint); padding: 0 2px; }
-.shot:hover img, .shot.active img { opacity: 1; }
-.shot.active { border-color: color-mix(in srgb, var(--accent) 55%, transparent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
-.shot-empty { cursor: default; justify-content: center; align-items: center; min-height: 96px; border-style: dashed; }
-.shot-empty span { color: var(--faint); }
 
 .history { margin: 0 0 16px; }
 .history-list {
@@ -818,7 +795,8 @@ h2 { font-size: 15px; letter-spacing: -0.015em; }
   transition: background 0.2s var(--ease), color 0.2s var(--ease), border-color 0.2s var(--ease);
 }
 .drive-btn svg { width: 13px; height: 13px; fill: currentColor; }
-.drive-btn:hover { color: var(--text); background: var(--surface-strong); }
+.drive-btn:hover:not(:disabled) { color: var(--text); background: var(--surface-strong); }
+.drive-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .drive-run { --tone: var(--ok); }
 .drive-stop { --tone: var(--confirmed); }
 .drive-btn[aria-pressed="true"] {

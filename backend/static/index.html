@@ -7,7 +7,7 @@
   <script>
     try { if (localStorage.getItem("theme") === "light") document.documentElement.dataset.theme = "light"; } catch {}
   </script>
-  <link rel="stylesheet" href="style.css?v=17">
+  <link rel="stylesheet" href="style.css?v=20">
 </head>
 <body>
   <header class="topbar">
@@ -80,7 +80,7 @@
           </div>
         </div>
         <div id="drive" class="drive" role="group" aria-label="주행 제어">
-          <button class="drive-btn drive-run" type="button" data-drive="run" title="주행 제어">
+          <button class="drive-btn drive-run" type="button" data-drive="run" title="주행 제어" disabled>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" /></svg>주행 시작
           </button>
           <button class="drive-btn drive-stop" type="button" data-drive="stop" title="주행 제어">
@@ -148,7 +148,7 @@
     </section>
     <label class="note">
       <span>메모</span>
-      <textarea id="detail-note" rows="3" placeholder="현장 확인 내용 등"></textarea>
+      <textarea id="detail-note" rows="4" placeholder="현장 확인 내용 등"></textarea>
     </label>
     <div class="detail-foot">
       <div id="detail-actions" class="actions"></div>
@@ -156,6 +156,6 @@
     </div>
   </dialog>
 
-  <script src="app.js?v=17"></script>
+  <script src="app.js?v=20"></script>
 </body>
 </html>

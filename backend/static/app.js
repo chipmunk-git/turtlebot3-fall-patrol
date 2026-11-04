@@ -80,9 +80,9 @@ const state = {
   eventsKey: "",
   filter: "all",
   selectedId: null,
-  detailPhoto: null,
   robot: null,
   robotChangedAt: 0,
+  robotReporting: false,
   serverOnline: null,
   map: null,
   mapImage: null,
@@ -125,6 +125,41 @@ function formatPosition(x, y) {
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+}
+
+// The robot prefixes its note lines with [robot:id] / [voice:id] and checks for them
+// before appending, so a retry cannot duplicate a line. They stay stored but are hidden.
+function parseNote(note) {
+  return (note ?? "").split("\n").map((line) => {
+    const match = line.match(/^(\[(?:robot|voice):[^\]\s]+\])\s*(.*)$/);
+    return match ? { marker: match[1], text: match[2] } : { marker: null, text: line };
+  });
+}
+
+function visibleNote(note) {
+  return parseNote(note)
+    .filter((line) => !line.marker || line.text)
+    .map((line) => line.text)
+    .join("\n");
+}
+
+// Markers of lines the user edited or removed are kept as bare lines, so the robot
+// still recognises them and does not write its original text back.
+function restoreNoteMarkers(edited, original) {
+  const lines = edited.split("\n");
+  const taken = new Set();
+  const orphans = [];
+  for (const { marker, text } of parseNote(original)) {
+    if (!marker) continue;
+    const index = text ? lines.findIndex((line, i) => !taken.has(i) && line.trim() === text.trim()) : -1;
+    if (index === -1) {
+      orphans.push(marker);
+    } else {
+      taken.add(index);
+      lines[index] = `${marker} ${text}`;
+    }
+  }
+  return [...(edited ? lines : []), ...orphans].join("\n") || null;
 }
 
 function cssVar(name) {
@@ -192,6 +227,8 @@ async function pollStatus() {
     const robot = await api("/status");
     if (!state.robot || robot.updated_at !== state.robot.updated_at) {
       state.robotChangedAt = performance.now();
+      // The first reply may be a record left by an earlier run, so only a change counts.
+      if (state.robot) state.robotReporting = true;
     }
     state.robot = robot;
     state.serverOnline = true;
@@ -199,6 +236,7 @@ async function pollStatus() {
     state.serverOnline = false;
   }
   renderRobot();
+  renderDrive();
 }
 
 async function pollEvents() {
@@ -226,9 +264,14 @@ function renderDrive() {
   group.querySelectorAll("[data-drive]").forEach((button) => {
     button.setAttribute("aria-pressed", String(button.dataset.drive === drive));
   });
+  // Stop stays available: it must never depend on the connection estimate.
+  const run = group.querySelector('[data-drive="run"]');
+  run.disabled = !robotCanDrive();
+  run.title = run.disabled ? "로봇이 연결되면 시작할 수 있습니다" : "주행 제어";
 }
 
 async function sendDrive(drive) {
+  if (drive === "run" && !robotCanDrive()) return;
   const group = $("#drive");
   group.classList.add("busy");
   try {
@@ -247,6 +290,10 @@ async function sendDrive(drive) {
 
 function robotIsStale() {
   return !state.robot || performance.now() - state.robotChangedAt > CONFIG.robotTimeoutMs;
+}
+
+function robotCanDrive() {
+  return state.serverOnline !== false && state.robotReporting && !robotIsStale();
 }
 
 function renderRobot() {
@@ -480,28 +527,12 @@ function selectedEvent() {
   return state.events.find((event) => event.id === state.selectedId);
 }
 
-function renderShots(event) {
-  const byKind = Object.fromEntries(event.snapshots.map((shot) => [shot.kind, shot]));
-  return Object.entries(SNAPSHOT_LABELS)
-    .map(([kind, label]) => {
-      const shot = byKind[kind];
-      if (!shot) return `<div class="shot shot-empty"><span>${label}</span><em>대기</em></div>`;
-      const active = shot.url === state.detailPhoto ? " active" : "";
-      return `<button class="shot${active}" data-shot="${shot.url}">
-          <img src="${shot.url}" alt=""><span>${label}</span><em>${kstClock.format(new Date(shot.created_at))}</em>
-        </button>`;
-    })
-    .join("");
-}
-
 function renderDetail() {
   const event = selectedEvent();
   if (!event || !detailDialog.open) return;
-  if (!event.snapshots.some((shot) => shot.url === state.detailPhoto)) state.detailPhoto = event.snapshot_url;
   $("#detail-body").innerHTML = `
     <h2>이벤트 #${event.id} ${badge(event.status)}</h2>
-    ${state.detailPhoto ? `<img id="detail-photo" class="detail-photo" src="${state.detailPhoto}" alt="스냅샷">` : ""}
-    <div class="shots">${renderShots(event)}</div>
+    ${event.snapshot_url ? `<img id="detail-photo" class="detail-photo" src="${event.snapshot_url}" alt="스냅샷">` : ""}
     <dl class="detail-fields">
       <dt>발생</dt><dd>${formatTime(event.created_at)}</dd>
       <dt>위치</dt><dd>${formatPosition(event.x, event.y)}</dd>
@@ -584,14 +615,13 @@ async function loadHistory(eventId) {
 
 function openDetail(id) {
   if (state.selectedId !== id) {
-    state.detailPhoto = null;
     renderVoice(null);
     $("#voice-progress").textContent = "확인 중…";
   }
   state.selectedId = id;
   const event = selectedEvent();
   if (!event) return;
-  $("#detail-note").value = event.note ?? "";
+  $("#detail-note").value = visibleNote(event.note);
   if (!detailDialog.open) detailDialog.showModal();
   renderDetail();
 }
@@ -954,8 +984,10 @@ function formatLog(entry) {
       return d.after === "run"
         ? { tag: "DRIVE", tone: "ok", message: "웹에서 주행 시작 명령" }
         : { tag: "DRIVE", tone: "alert", message: "웹에서 주행 정지 명령" };
-    case "event_note":
-      return { tag: "NOTE", tone: "check", message: d.note ? `이벤트 #${id} 메모 · "${d.note}"` : `이벤트 #${id} 메모 삭제` };
+    case "event_note": {
+      const note = visibleNote(d.note).split("\n").filter(Boolean).join(" · ");
+      return { tag: "NOTE", tone: "check", message: note ? `이벤트 #${id} 메모 · ${note}` : `이벤트 #${id} 메모 삭제` };
+    }
     case "event_alarm_presented":
       return { tag: "ALARM", tone: "alert", message: `이벤트 #${id} 팝업 표시 · 부저 경보 대상 등록` };
     case "event_alarm_muted":
@@ -1021,13 +1053,6 @@ document.addEventListener("click", async (e) => {
     }
     return;
   }
-  const shotButton = e.target.closest("[data-shot]");
-  if (shotButton) {
-    state.detailPhoto = shotButton.dataset.shot;
-    $("#detail-photo").src = state.detailPhoto;
-    document.querySelectorAll(".shot").forEach((shot) => shot.classList.toggle("active", shot === shotButton));
-    return;
-  }
   const driveButton = e.target.closest("[data-drive]");
   if (driveButton) {
     sendDrive(driveButton.dataset.drive);
@@ -1055,7 +1080,7 @@ $("#note-save").addEventListener("click", async () => {
   const button = $("#note-save");
   button.disabled = true;
   try {
-    await updateEvent(state.selectedId, { note: $("#detail-note").value.trim() || null });
+    await updateEvent(state.selectedId, { note: restoreNoteMarkers($("#detail-note").value.trim(), selectedEvent()?.note) });
     button.textContent = "저장됨";
     setTimeout(() => (button.textContent = "메모 저장"), 1200);
   } catch (error) {
