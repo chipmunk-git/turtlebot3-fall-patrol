@@ -5,6 +5,7 @@ import io
 import json
 from pathlib import Path
 import shlex
+import socket
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,232 @@ SPEC = importlib.util.spec_from_file_location("demo_launcher", Path(__file__).wi
 DEMO = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = DEMO
 SPEC.loader.exec_module(DEMO)
+
+
+class ExternalServerTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.config = dict(
+            pc_root="/workspace with spaces/project_ws", pi_root="~/fall_patrol/project_ws",
+            robot="robot@example.invalid", server_url="http://server.invalid:8000",
+            domain="33", rmw="", opencr="", mcu="", speaker_card="UACDemoV10",
+            input_device="plughw:CARD=microphone,DEV=0", output_device="plughw:CARD=UACDemoV10,DEV=0",
+            timeout=2, run_dir=self.temp.name, ssh_socket=self.temp.name + "/ssh",
+            whisper_cli="~/whisper.cpp/build/bin/whisper-cli",
+            model="~/whisper.cpp/models/ggml-base-q8_0.bin", external_server=True,
+        )
+
+    @staticmethod
+    def done(code=0, stderr=""):
+        return subprocess.CompletedProcess([], code, "", stderr)
+
+    def test_robot_programs_keep_their_order_without_the_server_job(self):
+        self.assertEqual([j.name for j in DEMO.build_jobs(self.config)], [
+            "bringup", "camera", "bridge", "voice", "outputs",
+            "localization", "video", "detector", "patrol"])
+
+    def test_server_command_is_identical_in_both_modes(self):
+        default = dict(self.config, external_server=False)
+        job = next(j for j in DEMO.build_jobs(default) if j.name == "server")
+        self.assertEqual(job.command, DEMO.server_command(self.config))
+        for text in ("--workers 1", "FALL_WHISPER_CLI", "FALL_WHISPER_MODEL", "--host 0.0.0.0"):
+            self.assertIn(text, job.command)
+
+    def test_stop_still_sends_web_stop_and_leaves_the_server_running(self):
+        events = []
+        launcher = DEMO.Launcher(self.config, run=lambda *a, **k: self.done(), sleep=lambda _: None)
+        launcher.panes.update({j.name: "%" + str(j.window) for j in launcher.jobs})
+        launcher.alive = lambda name: name in launcher.panes
+        launcher.execute = lambda host, script, **k: events.append(("web-stop", script)) or self.done()
+        launcher.stop_job = lambda name: events.append(name) or True
+        launcher.tmux = lambda *a, **k: self.done()
+        launcher.save = lambda: None
+        with patch("sys.stdout", io.StringIO()):
+            launcher.stop()
+        self.assertEqual(events[0][0], "web-stop")
+        self.assertIn('{"drive":"stop"}', events[0][1])
+        self.assertEqual(events[1:], ["patrol", "voice", "outputs", "bridge", "detector", "localization", "video", "camera", "bringup"])
+
+    def test_stop_continues_and_warns_when_web_stop_fails(self):
+        events = []
+        launcher = DEMO.Launcher(self.config, run=lambda *a, **k: self.done(), sleep=lambda _: None)
+        launcher.alive = lambda name: False
+        launcher.execute = lambda *a, **k: self.done(7)
+        launcher.stop_job = lambda name: events.append(name) or True
+        launcher.tmux = lambda *a, **k: self.done()
+        launcher.save = lambda: None
+        error = io.StringIO()
+        with patch("sys.stdout", io.StringIO()), patch("sys.stderr", error):
+            launcher.stop()
+        self.assertIn("주행 정지 명령을 보내지 못했습니다", error.getvalue())
+        self.assertEqual(events[0], "patrol")
+
+    def test_default_mode_still_skips_web_stop_when_its_server_is_gone(self):
+        config = dict(self.config, external_server=False)
+        calls = []
+        launcher = DEMO.Launcher(config, run=lambda *a, **k: self.done(), sleep=lambda _: None)
+        launcher.alive = lambda name: False
+        launcher.execute = lambda *a, **k: calls.append(a) or self.done()
+        launcher.tmux = lambda *a, **k: self.done()
+        launcher.save = lambda: None
+        with patch("sys.stdout", io.StringIO()):
+            launcher.stop()
+        self.assertEqual(calls, [])
+
+    def test_preflight_requires_this_workspace_server_and_keeps_video_port_check(self):
+        scripts = []
+        launcher = DEMO.Launcher(self.config, run=lambda *a, **k: self.done(), sleep=lambda _: None)
+        launcher.tmux = lambda *a, **k: self.done(1)
+        launcher.execute = lambda host, script, **k: scripts.append(script) or self.done()
+        with patch.dict("os.environ", {"DISPLAY": ":0"}):
+            DEMO.preflight(launcher)
+        self.assertIn("/workspace with spaces/project_ws/backend", scripts[0])
+        self.assertIn("for port in (8080,)", scripts[0])
+
+    def test_default_preflight_keeps_both_ports_and_hints_external_mode(self):
+        config = dict(self.config, external_server=False)
+        launcher = DEMO.Launcher(config, run=lambda *a, **k: self.done(), sleep=lambda _: None)
+        launcher.tmux = lambda *a, **k: self.done(1)
+        scripts = []
+        launcher.execute = lambda host, script, **k: scripts.append(script) or self.done(1, "필요 조건 확인 실패: import socket")
+        with patch.dict("os.environ", {"DISPLAY": ":0"}), self.assertRaisesRegex(RuntimeError, "--external-server"):
+            DEMO.preflight(launcher)
+        self.assertIn("for port in (8000, 8080)", scripts[0])
+
+    def test_wait_ready_stops_when_external_server_disappears(self):
+        launcher = DEMO.Launcher(self.config, run=lambda *a, **k: self.done(), sleep=lambda _: None)
+        launcher.execute = lambda *a, **k: self.done(1, "서버 응답 없음")
+        with self.assertRaisesRegex(RuntimeError, "외부 서버 확인 실패"):
+            launcher.wait_ready(launcher.jobs[0])
+
+    def test_server_check_rejects_a_server_from_another_workspace(self):
+        directory = Path(self.temp.name)
+        for name, body in (("curl", "echo '{\"status\":\"ok\"}'"),
+                           ("ss", "echo 'pid=1'"),
+                           ("readlink", "echo /other/workspace/backend")):
+            path = directory / name
+            path.write_text("#!/bin/bash\n" + body + "\n")
+            path.chmod(0o755)
+        env = {"PATH": str(directory) + ":/usr/bin:/bin"}
+        script = DEMO.server_check(self.config)
+        wrong = subprocess.run(["/bin/bash", "-c", script], env=env, capture_output=True, text=True)
+        self.assertEqual(wrong.returncode, 1)
+        self.assertIn("/other/workspace/backend", wrong.stderr)
+        (directory / "readlink").write_text("#!/bin/bash\necho '/workspace with spaces/project_ws/backend'\n")
+        right = subprocess.run(["/bin/bash", "-c", script], env=env, capture_output=True, text=True)
+        self.assertEqual(right.returncode, 0, right.stderr)
+
+    def manager(self, healthy=False, port_used=False, session=False, owner=""):
+        calls = []
+        def run(command, **kwargs):
+            calls.append(command)
+            if command[0] == "tmux":
+                return self.done(0 if session or command[5] != "has-session" else 1)
+            script = command[-1]
+            if "socket.socket" in script:
+                return self.done(1 if port_used else 0)
+            if 'printf "%s"' in script:
+                return subprocess.CompletedProcess([], 0, owner, "")
+            return self.done(0 if healthy else 1)
+        return DEMO.ServerManager(self.config, Path(self.temp.name) / "server.log", run=run, sleep=lambda _: None), calls
+
+    def test_server_start_reuses_this_workspace_server(self):
+        manager, calls = self.manager(healthy=True, port_used=True)
+        with patch("sys.stdout", io.StringIO()):
+            manager.start()
+        self.assertFalse([c for c in calls if "new-session" in c])
+
+    def test_server_start_refuses_a_port_used_by_another_workspace(self):
+        manager, calls = self.manager(port_used=True, owner="/other/workspace/backend")
+        with self.assertRaisesRegex(RuntimeError, "/other/workspace/backend"):
+            manager.start()
+        self.assertFalse([c for c in calls if "new-session" in c])
+
+    def test_server_stop_never_touches_a_server_it_did_not_start(self):
+        manager, calls = self.manager(port_used=True, owner="/other/workspace/backend")
+        with self.assertRaisesRegex(RuntimeError, "server-start로 시작한 서버가 아닙니다"):
+            manager.stop()
+        self.assertFalse([c for c in calls if "send-keys" in c])
+
+    def test_port_check_detects_listener_but_ignores_time_wait(self):
+        listener = socket.socket()
+        self.addCleanup(listener.close)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        client = socket.create_connection(("127.0.0.1", port))
+        accepted, _ = listener.accept()
+        accepted.close()  # The closing side holds this port in TIME_WAIT.
+        client.close()
+        manager = DEMO.ServerManager(self.config, Path(self.temp.name) / "server.log")
+        with patch.object(DEMO, "SERVER_PORT", port):
+            # A wildcard bind conflicts with the listener on 127.0.0.1.
+            self.assertTrue(manager.port_in_use())
+            listener.close()
+            self.assertFalse(manager.port_in_use())
+
+    def restart_launcher(self, stopped=True):
+        events = []
+        launcher = DEMO.Launcher(self.config, run=lambda *a, **k: self.done(), sleep=lambda _: None)
+        launcher.panes["patrol"] = "%1"
+        launcher.send_web_stop = lambda: events.append("web-stop")
+        launcher.stop_job = lambda name: events.append("stop:" + name) or stopped
+        launcher.tmux = lambda *a, **k: events.append(a[0]) or self.done()
+        launcher.wait_ready = lambda job: events.append("ready:" + job.name)
+        return launcher, events
+
+    def test_patrol_restart_stops_first_and_touches_only_patrol(self):
+        launcher, events = self.restart_launcher()
+        with patch("sys.stdout", io.StringIO()):
+            launcher.restart_patrol()
+        self.assertEqual(events, ["web-stop", "stop:patrol", "respawn-pane", "pipe-pane", "ready:patrol"])
+
+    def test_patrol_restart_does_not_respawn_when_patrol_will_not_stop(self):
+        launcher, events = self.restart_launcher(stopped=False)
+        with self.assertRaisesRegex(RuntimeError, "순찰이 종료되지 않았습니다"):
+            launcher.restart_patrol()
+        self.assertNotIn("respawn-pane", events)
+
+    def run_main_until_ssh(self, argv):
+        calls = []
+        class Manager:
+            def __init__(self, *a, **k): pass
+            def start(self): calls.append("server-start")
+        def ssh(*a, **k):
+            calls.append("ssh")
+            raise subprocess.CalledProcessError(255, "ssh")
+        with patch.object(DEMO, "ROOT", Path(self.temp.name)), patch.object(DEMO, "ServerManager", Manager), \
+                patch.object(DEMO.subprocess, "run", ssh), self.assertRaises(subprocess.SubprocessError):
+            DEMO.main(argv)
+        return calls
+
+    def test_external_start_brings_up_the_server_before_the_robot(self):
+        base = ["start", "--robot", "u@h", "--server-url", "http://1.2.3.4:8000"]
+        self.assertEqual(self.run_main_until_ssh(base + ["--external-server"]), ["server-start", "ssh"])
+        self.assertEqual(self.run_main_until_ssh(base), ["ssh"])
+
+    def test_patrol_restart_requires_a_running_demo(self):
+        root = Path(self.temp.name)
+        run_dir = root / "run"
+        run_dir.mkdir()
+        (run_dir / "state.json").write_text(json.dumps(dict(self.config, stopped=True, run_dir=str(run_dir))))
+        state_root = root / "log" / "demo"
+        state_root.mkdir(parents=True)
+        (state_root / "current").write_text(str(run_dir) + "\n")
+        with patch.object(DEMO, "ROOT", root), self.assertRaisesRegex(RuntimeError, "start를 먼저"):
+            DEMO.main(["patrol-restart"])
+
+    def test_demo_and_server_use_separate_tmux_servers(self):
+        self.assertNotEqual(DEMO.SOCKET, DEMO.SERVER_SOCKET)
+
+    def test_external_flag_and_server_actions_parse(self):
+        args = DEMO.arguments(["start", "--robot", "u@h", "--server-url", "http://1.2.3.4:8000", "--external-server"])
+        self.assertTrue(args.external_server)
+        self.assertFalse(DEMO.arguments(["start", "--robot", "u@h", "--server-url", "http://1.2.3.4:8000"]).external_server)
+        for action in ("server-start", "server-stop", "server-status", "patrol-restart"):
+            self.assertEqual(DEMO.arguments([action]).action, action)
 
 
 class LauncherTests(unittest.TestCase):

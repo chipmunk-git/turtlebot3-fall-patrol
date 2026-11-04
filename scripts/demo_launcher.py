@@ -18,6 +18,9 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parents[1]
 SOCKET = "turtlewatch-demo"
 SESSION = "demo"
+SERVER_SOCKET = "turtlewatch-server"
+SERVER_SESSION = "server"
+SERVER_PORT = 8000
 NO_EXISTING_DRIVER = r"""
 if info=$(ros2 topic info /cmd_vel 2>/dev/null); then
     if ! [[ "$info" =~ Publisher\ count:\ 0([^0-9]|$) ]]; then
@@ -94,21 +97,48 @@ def device_command(override, pattern, label):
             + ' >&2; exit 1; }\ndevice=${devices[0]}\n[[ -r "$device" && -w "$device" ]]\n')
 
 
+def server_command(config):
+    return (environment(config, "pc", "none")
+            + "export FALL_WHISPER_CLI=" + shell_path(config["whisper_cli"]) + "\n"
+            + "export FALL_WHISPER_MODEL=" + shell_path(config["model"]) + "\n"
+            + "cd " + quote(config["pc_root"] + "/backend") + "\n"
+            + f"exec .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port {SERVER_PORT} --workers 1")
+
+
+def health_probe():
+    return ("curl -fsS --max-time 3 " + quote(f"http://127.0.0.1:{SERVER_PORT}/health")
+            + " | /usr/bin/python3 -c " + quote("import json,sys; assert json.load(sys.stdin).get('status') == 'ok'"))
+
+
+def port_owner_script():
+    """Print the working directory of the process listening on the server port."""
+    return (f"pid=$(ss -ltnpH 'sport = :{SERVER_PORT}' | grep -oP 'pid=\\K[0-9]+' | head -n1 || true)\n"
+            'owner=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)\n')
+
+
+def server_check(config):
+    """/health alone cannot tell this workspace's server from another copy's."""
+    expected = config["pc_root"] + "/backend"
+    return (port_owner_script()
+            + "if ! " + health_probe() + " >/dev/null; then\n"
+            + "  echo " + quote(f"{SERVER_PORT}번 서버가 응답하지 않습니다. 먼저 bash scripts/demo.sh server-start를 실행하세요.") + " >&2; exit 1\nfi\n"
+            + "if [[ \"$owner\" != " + quote(expected) + " ]]; then\n"
+            + "  echo \"" + f"{SERVER_PORT}" + "번 서버가 이 작업공간의 서버가 아닙니다: ${owner:-확인 불가}\" >&2; exit 1\nfi\n")
+
+
 def build_jobs(config):
     pc = environment(config, "pc")
     pi = environment(config, "pi")
     robot = environment(config, "pi", "robot")
     plain = environment(config, "pc", "none")
-    base = "http://127.0.0.1:8000"
-    health = "curl -fsS --max-time 3 " + quote(base + "/health")
-    health += " | /usr/bin/python3 -c " + quote("import json,sys; assert json.load(sys.stdin).get('status') == 'ok'")
+    base = f"http://127.0.0.1:{SERVER_PORT}"
     pose_check = (
         "import json, sys, yaml\n"
         "value = next(yaml.safe_load_all(sys.stdin))\n"
         "data = json.loads(value) if isinstance(value, str) else value\n"
         "assert isinstance(data, dict) and data.get('camera_status') == 'ok'\n"
     )
-    return [
+    jobs = [
         Job("bringup", "pi", 9, robot + device_command(config["opencr"],
             "/dev/serial/by-id/usb-ROBOTIS_OpenCR*", "OpenCR")
             + 'exec ros2 launch turtlebot3_bringup robot.launch.py usb_port:="$device"',
@@ -119,12 +149,7 @@ def build_jobs(config):
             + 'exec ros2 run v4l2_camera v4l2_camera_node --ros-args -p image_size:="[320,240]"'
             + ' -p time_per_frame:="[1,15]" -p image_raw.jpeg_quality:=50',
             plain + topic_probe("/image_raw/compressed", "sensor_msgs/msg/CompressedImage")),
-        Job("server", "pc", 4, plain
-            + "export FALL_WHISPER_CLI=" + shell_path(config["whisper_cli"]) + "\n"
-            + "export FALL_WHISPER_MODEL=" + shell_path(config["model"]) + "\n"
-            + "cd " + quote(config["pc_root"] + "/backend") + "\n"
-            + "exec .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1",
-            plain + health),
+        Job("server", "pc", 4, server_command(config), plain + health_probe()),
         Job("bridge", "pi", 5, pi + device_command(config["mcu"],
             "/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink*", "NUCLEO")
             + 'exec ros2 run tb3_arduino_io bridge --ros-args -p port:="$device"',
@@ -160,6 +185,89 @@ def build_jobs(config):
             plain + node_probe("/astar_driver_yolo") + "\n"
             + topic_probe("/fall_patrol/state", "std_msgs/msg/String", "data")),
     ]
+    if config.get("external_server"):
+        jobs = [job for job in jobs if job.name != "server"]
+    return jobs
+
+
+class ServerManager:
+    """Run FastAPI in its own tmux server so that demo stop leaves it available."""
+
+    def __init__(self, config, log_path, run=subprocess.run, clock=time.monotonic, sleep=time.sleep):
+        self.config = config
+        self.log_path = Path(log_path)
+        self.run = run
+        self.clock = clock
+        self.sleep = sleep
+
+    def tmux(self, *args, check=True):
+        result = self.run(["tmux", "-L", SERVER_SOCKET, "-f", "/dev/null", *args],
+                          capture_output=True, text=True, timeout=10)
+        if check and result.returncode:
+            raise RuntimeError(result.stderr.strip() or "tmux 명령 실패")
+        return result
+
+    def bash(self, script):
+        return self.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=15)
+
+    def session_exists(self):
+        return self.tmux("has-session", "-t", SERVER_SESSION, check=False).returncode == 0
+
+    def healthy(self):
+        return self.bash(server_check(self.config)).returncode == 0
+
+    def owner(self):
+        result = self.bash(port_owner_script() + 'printf "%s" "$owner"')
+        return result.stdout.strip()
+
+    def port_in_use(self):
+        # SO_REUSEADDR: only a live listener counts, not TIME_WAIT left by a server just stopped.
+        code = f"import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('0.0.0.0',{SERVER_PORT}))"
+        return self.bash("/usr/bin/python3 -c " + quote(code)).returncode != 0
+
+    def start(self):
+        if self.healthy():
+            print("이 작업공간의 서버가 이미 실행 중입니다.", flush=True)
+            return
+        if self.port_in_use():
+            raise RuntimeError(f"{SERVER_PORT}번 포트를 다른 프로그램이 사용 중입니다: "
+                               + (self.owner() or "확인 불가") + "\n그 서버를 먼저 종료하세요.")
+        if self.session_exists():
+            raise RuntimeError("서버 세션이 있지만 응답하지 않습니다. server-status로 확인하세요.")
+        self.tmux("new-session", "-d", "-s", SERVER_SESSION, "-n", "fastapi",
+                  "/bin/bash", "-c", server_command(self.config))
+        self.tmux("pipe-pane", "-o", "-t", SERVER_SESSION, "cat >> " + quote(self.log_path), check=False)
+        deadline = self.clock() + self.config["timeout"]
+        while self.clock() < deadline:
+            if self.healthy():
+                print("서버 시작 완료. 로그: " + str(self.log_path), flush=True)
+                return
+            if not self.session_exists():
+                raise RuntimeError("서버가 시작 중 종료됐습니다. 로그: " + str(self.log_path))
+            self.sleep(0.5)
+        raise RuntimeError("서버 준비 시간 초과. 로그: " + str(self.log_path))
+
+    def stop(self):
+        if not self.session_exists():
+            if self.port_in_use():
+                raise RuntimeError(f"{SERVER_PORT}번 서버는 server-start로 시작한 서버가 아닙니다: "
+                                   + (self.owner() or "확인 불가"))
+            print("실행 중인 서버가 없습니다.", flush=True)
+            return
+        self.tmux("send-keys", "-t", SERVER_SESSION, "C-c")
+        deadline = self.clock() + 15
+        while self.clock() < deadline:
+            if not self.session_exists():
+                print("서버 종료 완료.", flush=True)
+                return
+            self.sleep(0.2)
+        raise RuntimeError("서버가 종료되지 않았습니다. 'tmux -L " + SERVER_SOCKET + " attach'로 확인하세요.")
+
+    def status(self):
+        print("server " + ("running" if self.healthy() else "stopped"))
+        if self.port_in_use():
+            print(f"{SERVER_PORT}번 포트 사용 폴더 " + (self.owner() or "확인 불가"))
+        print("로그 " + str(self.log_path))
 
 
 class Launcher:
@@ -232,6 +340,10 @@ class Launcher:
             dead = [name for name in self.panes if not self.alive(name)]
             if dead:
                 raise RuntimeError("프로그램이 종료됐습니다: " + ", ".join(dead))
+            if self.config.get("external_server"):
+                server = self.execute("pc", server_check(self.config))
+                if server.returncode:
+                    raise RuntimeError("외부 서버 확인 실패\n" + server.stderr)
             result = self.execute("pi" if job.name == "voice" else "pc", job.probe)
             last_error = (result.stderr or result.stdout)[-1000:]
             if result.returncode == 0:
@@ -263,7 +375,7 @@ class Launcher:
                 self.tmux("set-environment", "-gu", key)
         self.save()
         for number, job in enumerate(self.jobs, 1):
-            print(f"[{number}/10] {job.host} {job.name} 시작·준비 확인", flush=True)
+            print(f"[{number}/{len(self.jobs)}] {job.host} {job.name} 시작·준비 확인", flush=True)
             self.start_job(job)
             self.wait_ready(job)
         self.tmux("select-window", "-t", SESSION + ":1")
@@ -280,14 +392,39 @@ class Launcher:
             self.sleep(0.2)
         return False
 
+    def send_web_stop(self):
+        external = self.config.get("external_server")
+        if external or self.alive("server"):
+            result = self.execute("pc", f"curl -fsS --max-time 3 -X PUT http://127.0.0.1:{SERVER_PORT}/control "
+                                  + "-H 'Content-Type: application/json' --data '{\"drive\":\"stop\"}'")
+            if external and result.returncode:
+                print("경고: 웹 주행 정지 명령을 보내지 못했습니다. 순찰 종료를 계속 진행합니다.", file=sys.stderr, flush=True)
+
+    def restart_patrol(self):
+        """Clear the route by restarting patrol only; the other programs keep running."""
+        job = next(job for job in self.jobs if job.name == "patrol")
+        self.send_web_stop()
+        if not self.stop_job("patrol"):
+            raise RuntimeError("순찰이 종료되지 않았습니다. patrol 창에서 확인하세요. 나머지 프로그램은 유지합니다.")
+        pane = self.panes["patrol"]
+        self.tmux("respawn-pane", "-t", pane)
+        # Without -o: that flag toggles an existing pipe off and would lose the log.
+        self.tmux("pipe-pane", "-t", pane, "cat >> " + quote(self.directory / "patrol.log"))
+        print("순찰 재시작·준비 확인", flush=True)
+        self.wait_ready(job)
+        print("순찰 재시작 완료. RViz에서 지점을 다시 지정한 뒤 웹에서 주행 시작을 누르세요.\n"
+              "처리하지 않은 사건이 있으면 웹에서 먼저 처리해야 지점을 지정할 수 있습니다.", flush=True)
+
     def stop(self):
-        if self.alive("server"):
-            self.execute("pc", "curl -fsS --max-time 3 -X PUT http://127.0.0.1:8000/control "
-                         + "-H 'Content-Type: application/json' --data '{\"drive\":\"stop\"}'")
+        external = self.config.get("external_server")
+        self.send_web_stop()
         if not self.stop_job("patrol"):
             raise RuntimeError("순찰이 종료되지 않았습니다. patrol 창에서 확인하세요. 나머지 통신은 유지합니다.")
         failed = []
-        for name in ("voice", "outputs", "bridge", "detector", "localization", "video", "camera", "bringup", "server"):
+        names = ["voice", "outputs", "bridge", "detector", "localization", "video", "camera", "bringup"]
+        if not external:
+            names.append("server")
+        for name in names:
             if name in self.panes:
                 print(name + " 종료 확인", flush=True)
             if not self.stop_job(name):
@@ -304,6 +441,8 @@ class Launcher:
         self.config["stopped"] = True
         self.save()
         print("종료 완료. 기능별 로그는 " + str(self.directory) + "에 있습니다.")
+        if external:
+            print("FastAPI 서버는 계속 실행 중입니다. 끄려면 bash scripts/demo.sh server-stop을 실행하세요.")
 
 
 def preflight(launcher):
@@ -313,6 +452,8 @@ def preflight(launcher):
     if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
         raise RuntimeError("RViz를 표시할 서버 PC의 데스크톱 터미널에서 실행하세요.")
     pc = environment(config, "pc")
+    external = config.get("external_server")
+    ports = (8080,) if external else (SERVER_PORT, 8080)
     tests = ["test -x backend/.venv/bin/python", "test -r src/maps/new_map.yaml",
              "test -r src/maps/new_map.pgm", "test -x " + shell_path(config["whisper_cli"]),
              "test -r " + shell_path(config["model"]),
@@ -322,7 +463,9 @@ def preflight(launcher):
              "ros2 pkg prefix web_video_server >/dev/null", "ros2 pkg prefix rviz2 >/dev/null",
              'nodes=$(ros2 node list)\nif grep -Eq "^/(astar_driver_yolo|lying_detector|fall_patrol_voice|tb3_arduino_bridge|amcl|map_server|rviz2|v4l2_camera|turtlebot3_node)$" <<< "$nodes"; then echo "기존 실행 노드를 종료한 뒤 시작하세요." >&2; exit 1; fi',
              NO_EXISTING_DRIVER,
-             "/usr/bin/python3 -c " + quote("import socket; sockets=[]\nfor port in (8000,8080):\n s=socket.socket(); s.bind(('0.0.0.0',port)); sockets.append(s)")]
+             "/usr/bin/python3 -c " + quote("import socket; sockets=[]\nfor port in " + repr(ports) + ":\n s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('0.0.0.0',port)); sockets.append(s)")]
+    if external:
+        tests.insert(0, server_check(config))
     checks = []
     for test in tests:
         if "\n" in test:
@@ -331,7 +474,10 @@ def preflight(launcher):
             checks.append(test + " || { echo " + quote("필요 조건 확인 실패: " + test) + " >&2; exit 1; }")
     result = launcher.execute("pc", pc + "\n".join(checks), timeout=30)
     if result.returncode:
-        raise RuntimeError("PC 준비 확인 실패\n" + result.stderr)
+        hint = ""
+        if not external and "socket" in result.stderr:
+            hint = "\n서버를 따로 실행 중이라면 시작 명령에 --external-server를 추가하세요."
+        raise RuntimeError("PC 준비 확인 실패\n" + result.stderr + hint)
     pi = environment(config, "pi")
     pi += "for tool in curl mpg123 arecord amixer timeout; do command -v \"$tool\" >/dev/null || exit 1; done\n"
     pi += 'nodes=$(ros2 node list)\nif grep -Eq "^/(fall_patrol_voice|tb3_arduino_bridge|v4l2_camera|turtlebot3_node)$" <<< "$nodes"; then echo "Pi의 기존 실행 노드를 종료하세요." >&2; exit 1; fi\n'
@@ -352,7 +498,7 @@ def preflight(launcher):
 
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("start", "stop", "status", "attach", "plan"))
+    parser.add_argument("action", choices=("start", "stop", "status", "attach", "plan", "server-start", "server-stop", "server-status", "patrol-restart"))
     parser.add_argument("--robot", help="Pi SSH 접속 대상, 예: ubuntu@ROBOT_IP")
     parser.add_argument("--server-url", help="Pi에서 접근할 서버 주소, 예: http://SERVER_IP:8000")
     parser.add_argument("--pi-root", default="~/fall_patrol/project_ws")
@@ -364,6 +510,8 @@ def arguments(argv=None):
     parser.add_argument("--speaker-card", default="UACDemoV10")
     parser.add_argument("--timeout", type=int, default=60)
     parser.add_argument("--no-attach", action="store_true")
+    parser.add_argument("--external-server", action="store_true",
+                        help="이 작업공간의 FastAPI를 재사용하거나 먼저 시작하고, stop에서 유지")
     args = parser.parse_args(argv)
     if args.action in ("start", "plan"):
         if not args.robot or args.robot.startswith("-") or any(c.isspace() for c in args.robot):
@@ -383,6 +531,8 @@ def arguments(argv=None):
 def main(argv=None):
     args = arguments(argv)
     state_root = ROOT / "log" / "demo"
+    whisper = dict(whisper_cli=os.environ.get("FALL_WHISPER_CLI", "~/whisper.cpp/build/bin/whisper-cli"),
+                   model=os.environ.get("FALL_WHISPER_MODEL", "~/whisper.cpp/models/ggml-base-q8_0.bin"))
     if args.action in ("start", "plan"):
         run_dir = state_root / (time.strftime("%Y%m%d-%H%M%S") + "-" + str(os.getpid()))
         config = dict(pc_root=str(ROOT), pi_root=args.pi_root, robot=args.robot,
@@ -390,13 +540,13 @@ def main(argv=None):
                       rmw=os.environ.get("RMW_IMPLEMENTATION", ""), opencr=args.opencr_port,
                       mcu=args.mcu_port, input_device=args.input_device, output_device=args.output_device,
                       speaker_card=args.speaker_card, timeout=args.timeout, run_dir=str(run_dir),
-                      whisper_cli=os.environ.get("FALL_WHISPER_CLI", "~/whisper.cpp/build/bin/whisper-cli"),
-                      model=os.environ.get("FALL_WHISPER_MODEL", "~/whisper.cpp/models/ggml-base-q8_0.bin"))
+                      external_server=args.external_server, **whisper)
         if args.action == "plan":
-            for number, job in enumerate(build_jobs(config), 1):
-                print(f"[{number}/10] {job.host} {job.name}\n{job.command}\n")
+            jobs = build_jobs(config)
+            for number, job in enumerate(jobs, 1):
+                print(f"[{number}/{len(jobs)}] {job.host} {job.name}\n{job.command}\n")
             return 0
-    for name in ("tmux", "ssh", "curl", "timeout"):
+    for name in ("tmux", "ssh", "curl", "timeout", "ss"):
         if not shutil.which(name):
             raise RuntimeError(name + " 명령이 필요합니다.")
     state_root.mkdir(parents=True, exist_ok=True)
@@ -406,11 +556,28 @@ def main(argv=None):
         except BlockingIOError as error:
             raise RuntimeError("다른 시작·종료 작업이 진행 중입니다.") from error
         current = state_root / "current"
+        if args.action.startswith("server-"):
+            server = ServerManager(dict(pc_root=str(ROOT), domain=args.domain, timeout=args.timeout,
+                                        rmw=os.environ.get("RMW_IMPLEMENTATION", ""), **whisper),
+                                   state_root / "server.log")
+            if args.action == "server-start":
+                server.start()
+            elif args.action == "server-status":
+                server.status()
+            else:
+                if current.exists():
+                    previous = json.loads((Path(current.read_text().strip()) / "state.json").read_text())
+                    if not previous.get("stopped"):
+                        raise RuntimeError("로봇 프로그램이 실행 중입니다. demo.sh stop을 먼저 실행하세요.")
+                server.stop()
+            return 0
         if args.action == "start":
             if current.exists():
                 previous = json.loads((Path(current.read_text().strip()) / "state.json").read_text())
                 if not previous.get("stopped"):
                     raise RuntimeError("이전 실행을 stop으로 정리한 뒤 시작하세요.")
+            if config["external_server"]:
+                ServerManager(config, state_root / "server.log").start()
             config["ssh_socket"] = tempfile.mkdtemp(prefix="tw-ssh-") + "/control"
             launcher = Launcher(config)
             # Authenticate once, through the user's terminal. Later windows reuse this connection.
@@ -437,6 +604,11 @@ def main(argv=None):
                 raise RuntimeError("이 스크립트로 시작한 실행 기록이 없습니다.")
             config = json.loads((Path(current.read_text().strip()) / "state.json").read_text())
             launcher = Launcher(config)
+            if args.action == "patrol-restart":
+                if config.get("stopped"):
+                    raise RuntimeError("실행 중인 로봇 프로그램이 없습니다. start를 먼저 실행하세요.")
+                launcher.restart_patrol()
+                return 0
             if args.action == "stop":
                 if not config.get("stopped"):
                     launcher.stop()
@@ -444,6 +616,9 @@ def main(argv=None):
             if args.action == "status":
                 for job in launcher.jobs:
                     print(job.name + " " + ("running" if launcher.alive(job.name) else "stopped"))
+                if config.get("external_server"):
+                    healthy = launcher.execute("pc", server_check(config)).returncode == 0
+                    print("server(외부) " + ("running" if healthy else "stopped"))
                 print("로그 " + str(launcher.directory))
                 return 0
         if not args.no_attach:

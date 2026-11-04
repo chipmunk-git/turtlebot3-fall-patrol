@@ -22,6 +22,8 @@ STM32 NUCLEO는 터틀봇(Pi)에 USB로 연결합니다. 브리지는 USB가 연
 
 서버 PC에서 `bash scripts/demo.sh start --robot ubuntu@ROBOT_IP --server-url http://SERVER_IP:8000`으로 아래 1~10번 순서를 실행할 수 있습니다. 준비 확인·기능별 로그·종료 방법은 [자동 실행 안내](../scripts/README.md)를 참고합니다. RViz 초기 위치·순찰 지점 지정과 웹의 주행 시작은 기존 절차를 따릅니다.
 
+시작 명령에 `--external-server`를 붙이면 `demo.sh stop` 후에도 서버가 유지되어 웹에서 사건 기록을 계속 볼 수 있습니다. 순찰 경로를 바꿀 때는 `bash scripts/demo.sh patrol-restart`로 순찰만 재시작합니다. 전체 명령은 [명령어 모음](../scripts/README.md#명령어-모음)에 있습니다.
+
 ## 처음 한 번 준비
 
 **PC**
@@ -173,7 +175,7 @@ ros2 run my_bot_fall patrol --ros-args -p server_url:=http://127.0.0.1:8000 -p v
 1. 대시보드 `http://SERVER_IP:8000`을 엽니다.
 2. RViz **2D Pose Estimate**로 실제 위치와 방향을 지정합니다. 레이저 점이 지도 벽과 겹치는지 확인합니다.
 3. RViz **2D Goal Pose**로 순찰 지점 3곳을 지정합니다. 지점 간격은 25cm 이상이며, 지정한 순서대로 반복합니다. 지점 사이 경로는 A*로 계산합니다.
-4. 순찰 터미널에 `목적지 설정 완료`가 나오면 대시보드에서 **주행 시작**을 누릅니다.
+4. 순찰 터미널에 `목적지 설정 완료`가 나오면 대시보드에서 **주행 시작**을 누릅니다. 3곳을 지정한 뒤에는 지점이 잠기므로, 경로를 바꾸려면 순찰을 재시작합니다.
 
 **정지:** 대시보드 **정지**를 누릅니다. 급하면 순찰 터미널에서 Ctrl+C를 누르고, 그래도 움직이면 본체 전원을 끕니다.
 
