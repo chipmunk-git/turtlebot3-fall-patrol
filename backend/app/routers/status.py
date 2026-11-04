@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.activity import record
 from app.database import get_db
-from app.models import RobotStatus, utcnow
+from app.models import RobotState, RobotStatus, utcnow
 from app.schemas import RobotStatusRead, RobotStatusUpdate
 
 router = APIRouter(prefix="/status", tags=["status"])
@@ -30,7 +30,9 @@ def update_status(data: RobotStatusUpdate, db: Session = Depends(get_db)) -> Rob
     for field, value in data.model_dump().items():
         setattr(status, field, value)
     status.updated_at = utcnow()
-    if status.state != previous:
+    # Patrol and idle alternate at every waypoint wait and sensor hiccup; the patrol's own logs explain those.
+    routine = {previous, status.state} <= {RobotState.PATROL, RobotState.IDLE}
+    if status.state != previous and not routine:
         record(db, "robot_state", before=previous.value, after=status.state.value, x=status.x, y=status.y)
     db.commit()
     return status

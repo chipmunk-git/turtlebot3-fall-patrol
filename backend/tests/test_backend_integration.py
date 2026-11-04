@@ -188,6 +188,29 @@ class BackendIntegrationTests(unittest.IsolatedAsyncioTestCase):
         code, response, _ = await self.request("GET", "/health")
         self.assertEqual((code, response), (200, {"status": "ok"}))
 
+    async def test_robot_log_is_stored_for_the_live_log(self):
+        body = dict(source="patrol", level="warn", category="drive", message="정지: 라이다 수신 지연")
+        code, _, _ = await self.request("POST", "/logs", body)
+        self.assertEqual(code, 204)
+        _, page, _ = await self.request("GET", "/logs")
+        entry = page["entries"][-1]
+        self.assertEqual((entry["kind"], entry["event_id"], entry["detail"]), ("robot_log", None, body))
+
+    async def test_only_non_routine_robot_states_reach_the_live_log(self):
+        for state in ("patrol", "idle", "patrol", "alert", "patrol"):
+            await self.request("PUT", "/status", {"state": state})
+        _, page, _ = await self.request("GET", "/logs")
+        changes = [(e["detail"]["before"], e["detail"]["after"]) for e in page["entries"] if e["kind"] == "robot_state"]
+        self.assertEqual(sorted(changes), [("alert", "patrol"), ("patrol", "alert")])
+
+    async def test_robot_log_rejects_invalid_values(self):
+        valid = dict(source="patrol", level="warn", category="drive", message="x")
+        for change in (dict(level="fatal"), dict(category="other"), dict(message=""), dict(message="x"*1001),
+                       dict(source=""), dict(source="x"*41)):
+            with self.subTest(change=change):
+                code, _, _ = await self.request("POST", "/logs", dict(valid, **change))
+                self.assertEqual(code, 422)
+
     async def test_new_control_table_does_not_replace_existing_event_data(self):
         event_id = self.add_event(note="existing event")
         columns = [column["name"] for column in inspect(self.engine).get_columns("events")]

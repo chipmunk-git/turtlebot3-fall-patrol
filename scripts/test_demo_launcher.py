@@ -5,6 +5,7 @@ import io
 import json
 from pathlib import Path
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -17,6 +18,39 @@ SPEC = importlib.util.spec_from_file_location("demo_launcher", Path(__file__).wi
 DEMO = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = DEMO
 SPEC.loader.exec_module(DEMO)
+
+
+def setUpModule():
+    # Tests must never write to a dashboard that happens to be running on this PC.
+    patcher = patch.object(DEMO, "post_log", lambda *a, **k: True)
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+
+
+class DashboardLogTests(unittest.TestCase):
+    def test_failure_is_reported_only_for_start_and_patrol_restart(self):
+        with patch.object(DEMO, "post_log") as post:
+            DEMO.report_failure(["start", "--robot", "u@h"], RuntimeError("camera 준비 시간 초과\n"))
+            DEMO.report_failure(["patrol-restart"], RuntimeError("종료됨"))
+            DEMO.report_failure(["status"], RuntimeError("무시"))
+        self.assertEqual([c.args for c in post.call_args_list], [
+            ("error", "로봇 프로그램 시작 실패: camera 준비 시간 초과"), ("error", "순찰 재시작 실패: 종료됨")])
+
+    def test_exit_hook_is_off_during_requested_exits(self):
+        config = dict(pc_root="/w", pi_root="~/p", robot="u@h", server_url="http://s:8000", domain="33", rmw="",
+                      opencr="", mcu="", speaker_card="x", input_device="x", output_device="x", timeout=2,
+                      run_dir=tempfile.mkdtemp(), ssh_socket="/s", whisper_cli="~/a", model="~/b", external_server=True)
+        self.addCleanup(shutil.rmtree, config["run_dir"])
+        order = []
+        launcher = DEMO.Launcher(config, run=lambda *a, **k: subprocess.CompletedProcess([], 0), sleep=lambda _: None)
+        launcher.panes["patrol"] = "%1"
+        launcher.send_web_stop = lambda: None
+        launcher.wait_ready = lambda job: None
+        launcher.stop_job = lambda name: order.append("stop") or True
+        launcher.tmux = lambda *a, **k: order.append(" ".join(a[:3])) or subprocess.CompletedProcess([], 0, "", "")
+        with patch("sys.stdout", io.StringIO()):
+            launcher.restart_patrol()
+        self.assertEqual(order[:3], ["set-hook -gu pane-died", "stop", "set-hook -g pane-died"])
 
 
 class ExternalServerTests(unittest.TestCase):
@@ -165,6 +199,44 @@ class ExternalServerTests(unittest.TestCase):
             manager.stop()
         self.assertFalse([c for c in calls if "send-keys" in c])
 
+    def test_server_logs_are_connected_before_program_is_released(self):
+        manager, calls = self.manager()
+        health = iter((False, True))
+        manager.healthy = lambda: next(health)
+        gate = manager.log_path.with_suffix(".go")
+        gate.touch()  # A previous run must not release the new server early.
+        original = manager.tmux
+
+        def tmux(*args, **kwargs):
+            if args[0] in ("new-session", "pipe-pane"):
+                self.assertFalse(gate.exists())
+            return original(*args, **kwargs)
+
+        manager.tmux = tmux
+        with patch("sys.stdout", io.StringIO()):
+            manager.start()
+        self.assertTrue(gate.exists())
+        commands = [c[5] for c in calls if c[0] == "tmux"]
+        self.assertLess(commands.index("new-session"), commands.index("pipe-pane"))
+
+    def test_server_logging_failure_does_not_release_the_program(self):
+        manager, _ = self.manager()
+        commands = []
+
+        def tmux(*args, **kwargs):
+            commands.append(args[0])
+            if args[0] == "has-session":
+                return self.done(1)
+            if args[0] == "pipe-pane":
+                raise RuntimeError("log unavailable")
+            return self.done()
+
+        manager.tmux = tmux
+        with self.assertRaisesRegex(RuntimeError, "log unavailable"):
+            manager.start()
+        self.assertFalse(manager.log_path.with_suffix(".go").exists())
+        self.assertEqual(commands[-1], "kill-session")
+
     def test_port_check_detects_listener_but_ignores_time_wait(self):
         listener = socket.socket()
         self.addCleanup(listener.close)
@@ -178,7 +250,7 @@ class ExternalServerTests(unittest.TestCase):
         client.close()
         manager = DEMO.ServerManager(self.config, Path(self.temp.name) / "server.log")
         with patch.object(DEMO, "SERVER_PORT", port):
-            # A wildcard bind conflicts with the listener on 127.0.0.1.
+            # A loopback listener must count even when wildcard binding is allowed.
             self.assertTrue(manager.port_in_use())
             listener.close()
             self.assertFalse(manager.port_in_use())
@@ -197,13 +269,73 @@ class ExternalServerTests(unittest.TestCase):
         launcher, events = self.restart_launcher()
         with patch("sys.stdout", io.StringIO()):
             launcher.restart_patrol()
-        self.assertEqual(events, ["web-stop", "stop:patrol", "respawn-pane", "pipe-pane", "ready:patrol"])
+        self.assertEqual([e for e in events if e != "set-hook"],
+                         ["web-stop", "stop:patrol", "respawn-pane", "pipe-pane", "ready:patrol"])
 
     def test_patrol_restart_does_not_respawn_when_patrol_will_not_stop(self):
         launcher, events = self.restart_launcher(stopped=False)
         with self.assertRaisesRegex(RuntimeError, "순찰이 종료되지 않았습니다"):
             launcher.restart_patrol()
         self.assertNotIn("respawn-pane", events)
+
+    def test_patrol_restart_reconnects_logs_before_releasing_the_program(self):
+        launcher, _ = self.restart_launcher()
+        gate = launcher.directory / "patrol.go"
+        gate.touch()
+
+        def tmux(*args, **kwargs):
+            if args[0] in ("respawn-pane", "pipe-pane"):
+                self.assertFalse(gate.exists())
+            return self.done()
+
+        launcher.tmux = tmux
+        with patch("sys.stdout", io.StringIO()):
+            launcher.restart_patrol()
+        self.assertTrue(gate.exists())
+
+    def test_patrol_restart_logging_failure_keeps_the_program_waiting(self):
+        launcher, _ = self.restart_launcher()
+        gate = launcher.directory / "patrol.go"
+        gate.touch()
+
+        def tmux(*args, **kwargs):
+            if args[0] == "pipe-pane":
+                raise RuntimeError("log unavailable")
+            return self.done()
+
+        launcher.tmux = tmux
+        with self.assertRaisesRegex(RuntimeError, "log unavailable"):
+            launcher.restart_patrol()
+        self.assertFalse(gate.exists())
+
+    def test_exit_hook_failure_does_not_block_patrol_restart(self):
+        launcher, _ = self.restart_launcher()
+        commands = []
+
+        def run(command, **kwargs):
+            commands.append(command[5])
+            return self.done(1 if command[5] == "set-hook" else 0)
+
+        launcher.run = run
+        launcher.tmux = DEMO.Launcher.tmux.__get__(launcher)
+        with patch("sys.stdout", io.StringIO()):
+            launcher.restart_patrol()
+        self.assertIn("respawn-pane", commands)
+        self.assertIn("pipe-pane", commands)
+
+    def test_unexpected_stop_error_restores_exit_monitoring(self):
+        launcher, _ = self.restart_launcher()
+        commands = []
+        launcher.unwatch_programs = lambda: commands.append("unwatch")
+        launcher.watch_programs = lambda: commands.append("watch")
+
+        def stop_programs():
+            raise subprocess.TimeoutExpired("tmux", 10)
+
+        launcher.stop_programs = stop_programs
+        with self.assertRaises(subprocess.TimeoutExpired):
+            launcher.stop()
+        self.assertEqual(commands, ["unwatch", "watch"])
 
     def run_main_until_ssh(self, argv):
         calls = []
@@ -213,7 +345,8 @@ class ExternalServerTests(unittest.TestCase):
         def ssh(*a, **k):
             calls.append("ssh")
             raise subprocess.CalledProcessError(255, "ssh")
-        with patch.object(DEMO, "ROOT", Path(self.temp.name)), patch.object(DEMO, "ServerManager", Manager), \
+        with patch.object(DEMO, "ROOT", Path(self.temp.name)), patch.object(DEMO.shutil, "which", return_value="/mock/tool"), \
+                patch.object(DEMO, "ServerManager", Manager), \
                 patch.object(DEMO.subprocess, "run", ssh), self.assertRaises(subprocess.SubprocessError):
             DEMO.main(argv)
         return calls
@@ -231,7 +364,8 @@ class ExternalServerTests(unittest.TestCase):
         state_root = root / "log" / "demo"
         state_root.mkdir(parents=True)
         (state_root / "current").write_text(str(run_dir) + "\n")
-        with patch.object(DEMO, "ROOT", root), self.assertRaisesRegex(RuntimeError, "start를 먼저"):
+        with patch.object(DEMO, "ROOT", root), patch.object(DEMO.shutil, "which", return_value="/mock/tool"), \
+                self.assertRaisesRegex(RuntimeError, "start를 먼저"):
             DEMO.main(["patrol-restart"])
 
     def test_demo_and_server_use_separate_tmux_servers(self):
@@ -378,7 +512,7 @@ class LauncherTests(unittest.TestCase):
         launcher.tmux = lambda *a, **k: events.append(a[0])
         launcher.save = lambda: None
         launcher.stop()
-        self.assertEqual(events, ["web-stop", "patrol", "voice", "outputs", "bridge", "detector", "localization", "video", "camera", "bringup", "server", "kill-session"])
+        self.assertEqual(events, ["set-hook", "web-stop", "patrol", "voice", "outputs", "bridge", "detector", "localization", "video", "camera", "bringup", "server", "kill-session"])
         self.assertTrue(self.config["stopped"])
 
     def test_hung_patrol_keeps_remaining_ros_and_server_available(self):
@@ -407,7 +541,7 @@ class LauncherTests(unittest.TestCase):
         events = []
         launcher.execute = lambda *a, **k: events.append("web-stop")
         launcher.stop_job = lambda name: events.append(name) or name != "outputs"
-        launcher.tmux = lambda *a, **k: self.fail("tmux session must stay available")
+        launcher.tmux = lambda *a, **k: self.assertNotEqual(a[0], "kill-session", "tmux session must stay available")
         launcher.run = lambda *a, **k: self.fail("SSH connection must stay available")
         launcher.save = lambda: self.fail("shutdown must not be marked complete")
         with self.assertRaisesRegex(RuntimeError, "출력 중계가 종료되지"):
@@ -445,7 +579,7 @@ class LauncherTests(unittest.TestCase):
         events.clear()
         outputs_ready = True
         launcher.stop()
-        self.assertEqual(events, ["web-stop", "outputs", "bridge", "detector", "localization", "video", "camera", "bringup", "server", "kill-session", "ssh-exit", "save"])
+        self.assertEqual(events, ["set-hook", "web-stop", "outputs", "bridge", "detector", "localization", "video", "camera", "bringup", "server", "kill-session", "ssh-exit", "save"])
         self.assertTrue(self.config["stopped"])
         self.assertFalse(running)
 

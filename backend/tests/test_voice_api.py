@@ -108,6 +108,85 @@ class VoiceApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first[1], second[1])
         self.assertEqual(len(self.calls), 1)
 
+    async def voice_logs(self):
+        _, page, _ = await self.client.request("GET", "/logs")
+        return [e["detail"] for e in page["entries"] if e["kind"] == "robot_log" and e["detail"]["category"] == "voice"]
+
+    async def test_recognition_result_reaches_the_live_log_once(self):
+        await self.post(key="logged-once")
+        await self.post(key="logged-once")
+        logs = await self.voice_logs()
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0]["level"], "warn")
+        self.assertIn("분류: 도움 필요", logs[0]["message"])
+
+    async def test_inference_failure_reaches_the_live_log(self):
+        with patch.object(self.voice.config, "WHISPER_CLI", self.root / "missing-cli"):
+            await self.post(key="logged-failure")
+        logs = await self.voice_logs()
+        self.assertEqual([log["level"] for log in logs], ["error"])
+        self.assertIn("음성 처리 실패(preparation)", logs[0]["message"])
+
+    async def test_log_commit_failure_preserves_the_recognition_result(self):
+        from sqlalchemy import func, select
+        from sqlalchemy.orm import Session
+        from app.models import ActivityLog, VoiceRecord
+        original_commit = Session.commit
+
+        def commit(db):
+            if any(isinstance(item, ActivityLog) for item in db.new):
+                db.flush()
+                raise RuntimeError("activity log unavailable")
+            return original_commit(db)
+
+        with patch.object(Session, "commit", commit), self.assertLogs(self.voice.logger, level="WARNING"):
+            code, result, _ = await self.post(key="log-write-failed")
+        self.assertEqual((code, result["status"], result["classification"]), (200, "ok", "도움 필요"))
+        with Session(self.client.engine) as db:
+            record = db.get(VoiceRecord, "log-write-failed")
+            self.assertEqual(record.phase, "completed")
+            self.assertEqual(record.result, result)
+            self.assertEqual(db.scalar(select(func.count()).select_from(ActivityLog)), 0)
+        retry = await self.post(key="log-write-failed")
+        self.assertEqual(retry[1], result)
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_pi_failure_response_survives_log_storage_failure(self):
+        with patch.object(self.voice, "record_activity", side_effect=RuntimeError("log unavailable")), \
+                self.assertLogs(self.voice.logger, level="WARNING"):
+            code, result, _ = await self.client.request("POST", "/voice/pi-failed/progress",
+                                                       dict(phase="failed", expires_at=self.expires))
+        self.assertEqual((code, result["phase"], result["classification"]), (200, "failed", "확인 필요"))
+
+    async def test_voice_response_is_sent_before_slow_logging_finishes(self):
+        entered, release = threading.Event(), threading.Event()
+        response_sent = asyncio.Event()
+        app = self.client.main.app
+
+        def slow_log(*args):
+            entered.set()
+            release.wait(3)
+
+        async def observed_app(scope, receive, send):
+            async def observe(message):
+                await send(message)
+                if message["type"] == "http.response.body" and not message.get("more_body", False):
+                    response_sent.set()
+            await app(scope, receive, observe)
+
+        with patch.object(self.voice, "log_voice", slow_log), patch.object(self.client.main, "app", observed_app):
+            task = asyncio.create_task(self.post(key="slow-log"))
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                self.assertTrue(response_sent.is_set())
+                self.assertFalse(task.done())
+                self.assertEqual((await self.client.request("GET", "/health"))[0], 200)
+                self.assertEqual((await self.client.request("GET", "/control"))[0], 200)
+            finally:
+                release.set()
+                code, result, _ = await task
+        self.assertEqual((code, result["status"]), (200, "ok"))
+
     async def test_same_id_cannot_be_reused_for_different_audio_or_deadline(self):
         expires = time.time()+60
         await self.post(expires=expires)

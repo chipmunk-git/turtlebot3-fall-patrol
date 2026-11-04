@@ -41,6 +41,7 @@ export async function runChecks() {
                    add(name) { classes.add(name); }, remove(name) { classes.delete(name); },
                    contains(name) { return classes.has(name); } },
       addEventListener() {}, setAttribute(name, value) { this.attributes[name] = value; },
+      querySelector(selector) { return driveButtons.find(button => selector === `[data-drive="${button.dataset.drive}"]`) ?? null; },
       querySelectorAll(selector) { return selector === '[data-drive]' ? driveButtons : []; },
       getContext() { return {}; } };
   }
@@ -85,7 +86,8 @@ export async function runChecks() {
       actionButtons, ROBOT_STEPS, ROBOT_STATE_LABELS, STATUS_LABELS, ACTIONS_BY_STATUS,
       renderToasts, renderRows, toPixel, mapViewSize, visibleMapEvents, applyTheme,
       pollControl, sendDrive, scheduleVisibleAlarms, pollAlarms, muteEventAlarm, alarmButton,
-      renderVoice, pollDetailVoice};
+      renderVoice, pollDetailVoice, renderDrive, pollStatus, robotCanDrive,
+      visibleNote, restoreNoteMarkers, renderDetail, openDetail, appendLogs};
   `, context);
   const api = context.displayTest;
   frames.length = 0; // Do not run the unrelated map animation startup.
@@ -126,6 +128,45 @@ export async function runChecks() {
     const log = api.formatLog(record);
     assert.equal(log.message, '로봇 의심 감지 → 접근 중');
     assert.equal(record.detail.after, 'approach');
+  });
+  check('robot logs display categories and severity without changing robot or event state', () => {
+    const before = JSON.stringify({robot: api.state.robot, events: api.state.events, control: api.state.control});
+    const categories = {system: 'SYSTEM', drive: 'DRIVE', route: 'ROUTE', vision: 'VISION',
+      event: 'EVENT', voice: 'VOICE', output: 'OUTPUT'};
+    for (const [category, tag] of Object.entries(categories)) {
+      for (const [level, tone] of Object.entries({info: 'check', ok: 'ok', warn: 'warn', error: 'alert'})) {
+        const record = {kind: 'robot_log', detail: {category, level, source: 'patrol', message: '정지 사유'}};
+        const formatted = api.formatLog(record);
+        assert.equal(formatted.tag, tag);
+        assert.equal(formatted.tone, tone);
+        assert.equal(formatted.message, '정지 사유');
+      }
+    }
+    assert.equal(JSON.stringify({robot: api.state.robot, events: api.state.events, control: api.state.control}), before);
+  });
+  check('robot log text is escaped before entering the log view', () => {
+    const list = query('#log');
+    list.children = [];
+    list.append = item => list.children.push(item);
+    context.document.createElement = element;
+    api.appendLogs([{kind: 'robot_log', created_at: '2026-11-05T00:00:00Z',
+      detail: {category: 'voice', level: 'info', message: '<img src=x onerror=alert(1)>'}}], true);
+    assert.equal(list.children.length, 1);
+    assert.doesNotMatch(list.children[0].innerHTML, /<img/);
+    assert.match(list.children[0].innerHTML, /&#60;img/);
+  });
+  check('confidence stays in event data while its display is hidden', () => {
+    assert.doesNotMatch(html, /신뢰도/);
+    assert.doesNotMatch(source, /event\.confidence|d\.confidence|신뢰도/);
+    for (const confidence of [null, 0, 0.75, 1]) {
+      const entry = {kind: 'event_created', event_id: 7,
+        detail: {status: 'confirmed', confidence}};
+      const before = JSON.stringify(entry);
+      const formatted = api.formatLog(entry);
+      assert.match(formatted.message, /이벤트 #7 생성/);
+      assert.doesNotMatch(formatted.message, /신뢰도|%/);
+      assert.equal(JSON.stringify(entry), before);
+    }
   });
   check('server disconnect and stale robot remain separate from blue idle', () => {
     for (const failure of ['server', 'robot']) {
@@ -185,6 +226,9 @@ export async function runChecks() {
     assert.equal(declarations('.drive')['grid-template-columns'], '1fr 1fr');
   });
   await checkAsync('drive buttons PUT run and stop without rewriting reported robot state', async () => {
+    api.state.robotReporting = true;
+    api.state.serverOnline = true;
+    api.state.robotChangedAt = 1000;
     const before = JSON.stringify(api.state.robot);
     for (const drive of ['run', 'stop']) {
       respond = async (url, options) => {
@@ -221,8 +265,104 @@ export async function runChecks() {
     assert.match(alerts.at(-1), /주행 명령 실패: 503/);
     respond = undefined;
   });
+  await checkAsync('saved robot status cannot enable run until another report arrives', async () => {
+    api.state.robot = null;
+    api.state.robotReporting = false;
+    let updated_at = '2026-11-04T00:00:00Z';
+    respond = async () => ({ok: true, json: async () => ({state: 'idle', x: null, y: null, yaw: null, updated_at})});
+    await api.pollStatus();
+    assert.equal(api.robotCanDrive(), false);
+    assert.equal(driveButtons[0].disabled, true);
+    await api.pollStatus();
+    assert.equal(api.robotCanDrive(), false);
+    updated_at = '2026-11-04T00:00:01Z';
+    await api.pollStatus();
+    assert.equal(api.robotCanDrive(), true);
+    assert.equal(driveButtons[0].disabled, false);
+    assert.notEqual(driveButtons[1].disabled, true);
+  });
+  await checkAsync('stale or disconnected robot blocks run while stop remains available', async () => {
+    api.state.robotChangedAt = -1000000;
+    api.renderDrive();
+    assert.equal(driveButtons[0].disabled, true);
+    const count = requests.length;
+    await api.sendDrive('run');
+    assert.equal(requests.length, count);
+    respond = async () => ({ok: true, json: async () => ({drive: 'stop'})});
+    await api.sendDrive('stop');
+    assert.equal(requests.length, count + 1);
+    api.state.robotChangedAt = 1000;
+    respond = async () => ({ok: false, status: 503});
+    await api.pollStatus();
+    assert.equal(api.robotCanDrive(), false);
+    assert.equal(driveButtons[0].disabled, true);
+    assert.notEqual(driveButtons[1].disabled, true);
+    api.state.serverOnline = true;
+    respond = undefined;
+  });
+  check('internal note markers are hidden while user and voice text remain visible', () => {
+    const note = '관리자 메모\n[robot:obs-1] 대상 관찰\n[voice:obs-1] 도와주세요\n[voice:old]';
+    assert.equal(api.visibleNote(note), '관리자 메모\n대상 관찰\n도와주세요');
+    assert.equal(api.visibleNote(null), '');
+    assert.equal(api.visibleNote('일반 [voice:obs-1] 메모'), '일반 [voice:obs-1] 메모');
+    assert.doesNotMatch(api.formatLog({kind: 'event_note', event_id: 7, detail: {note}}).message, /\[(?:robot|voice):/);
+  });
+  check('editing or deleting generated note text preserves deduplication markers', () => {
+    const original = '관리자 메모\n[robot:obs-1] 대상 관찰\n[voice:obs-1] 도와주세요';
+    const unchanged = api.restoreNoteMarkers(api.visibleNote(original), original);
+    assert.equal(unchanged, original);
+    const edited = api.restoreNoteMarkers('수정 메모\n도와주세요', original);
+    assert.match(edited, /\[voice:obs-1\] 도와주세요/);
+    assert.match(edited, /\[robot:obs-1\]$/);
+    assert.equal(api.visibleNote(edited), '수정 메모\n도와주세요');
+    assert.equal(api.restoreNoteMarkers('', original), '[robot:obs-1]\n[voice:obs-1]');
+    assert.equal(api.restoreNoteMarkers('', null), null);
+  });
   const event = (id, status, created_at) => ({id, status, created_at, snapshot_url: null,
     x: 0, y: 0, confidence: null});
+  check('detail uses the representative photo and shows notes without internal markers', () => {
+    const record = {...event(17, 'confirmed', '2026-11-04T00:00:00Z'),
+      snapshot_url: '/snapshots/main.jpg',
+      snapshots: ['/snapshots/first.jpg', '/snapshots/second.jpg'],
+      note: '관리자 메모\n[voice:obs-17] 도와주세요'};
+    api.state.events = [record];
+    query('#detail').open = true;
+    api.openDetail(17);
+    assert.match(query('#detail-body').innerHTML, /src="\/snapshots\/main.jpg"/);
+    assert.doesNotMatch(query('#detail-body').innerHTML, /first\.jpg|second\.jpg|class="shots"/);
+    assert.equal(query('#detail-note').value, '관리자 메모\n도와주세요');
+    assert.equal(record.note, '관리자 메모\n[voice:obs-17] 도와주세요');
+    query('#detail').open = false;
+    api.state.selectedId = null;
+  });
+  check('popup, event rows and detail hide confidence without changing received events', () => {
+    const saved = {events: api.state.events, selectedId: api.state.selectedId,
+      filter: api.state.filter, shownToasts: api.state.shownToasts, voicePending: api.state.voicePending};
+    const savedFrames = frames.length;
+    api.state.shownToasts = new Set(saved.shownToasts);
+    api.state.filter = 'all';
+    query('#detail').open = true;
+    try {
+      for (const confidence of [null, 0, 0.75, 1]) {
+        const record = {...event(77, 'confirmed', '2026-11-05T00:00:00Z'), confidence};
+        const before = JSON.stringify(record);
+        api.state.events = [record];
+        api.renderToasts();
+        api.renderRows();
+        api.openDetail(77);
+        assert.doesNotMatch(query('#toasts').innerHTML, /신뢰도|75%|100%/);
+        assert.doesNotMatch(query('#event-rows').innerHTML, /신뢰도|75%|100%/);
+        assert.equal((query('#event-rows').innerHTML.match(/<td>/g) ?? []).length, 4);
+        assert.doesNotMatch(query('#detail-body').innerHTML, /신뢰도|75%|100%/);
+        assert.match(query('#detail-body').innerHTML, /이벤트 #77/);
+        assert.equal(JSON.stringify(record), before);
+      }
+    } finally {
+      Object.assign(api.state, saved);
+      query('#detail').open = false;
+      frames.length = savedFrames;
+    }
+  });
   check('toasts show the oldest pending event and keep the next alert available', () => {
     api.state.events = [event(2, 'uncertain', '2026-10-31T01:01:00Z'),
       event(3, 'resolved', '2026-10-31T01:02:00Z'),

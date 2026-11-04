@@ -5,10 +5,11 @@ No microphone/speaker is required. Voice prompts are printed as text previews.
 Run the Arduino serial bridge separately. The backend may be driven by fake_robot.py.
 """
 import argparse
+from datetime import datetime
 import json
 import time
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import rclpy
 from rclpy.node import Node
@@ -37,6 +38,18 @@ def publish_twice(publisher, message):
     publisher.publish(message)
 
 
+def post_log(server_url, level, message):
+    """Best effort: a dashboard log must never stop the display and buzzer relay."""
+    body = dict(source="outputs", level=level, category="output", message=message)
+    request = Request(server_url.rstrip("/") + "/logs", data=json.dumps(body).encode(),
+                      headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urlopen(request, timeout=1.0):
+            return True
+    except Exception:
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--server-url", default="http://127.0.0.1:8000")
@@ -58,6 +71,7 @@ def main():
     last_buzzer_publish = 0.0
     warned = False
     alarm_warned = False
+    status_failed_at = None
     try:
         publish_twice(buzzer_pub, Bool(data=False))
         # Allow the local DDS participant to discover the long-running Arduino bridge.
@@ -76,6 +90,12 @@ def main():
                 state = STATE_ALIASES.get(state, state)
                 warned = False
                 now = time.monotonic()
+                if status_failed_at is not None:
+                    # The server was unreachable, so this is the first chance to report it.
+                    seconds = (datetime.now() - status_failed_at).total_seconds()
+                    post_log(args.server_url, "error", "출력 중계 서버 통신 실패 후 복구: "
+                             f"{status_failed_at:%H:%M:%S}부터 {seconds:.0f}초간 끊김")
+                    status_failed_at = None
                 refresh_outputs = state != last_state or now - last_publish >= REFRESH_INTERVAL
                 if refresh_outputs:
                     if state in STATES:
@@ -96,6 +116,7 @@ def main():
                 if not warned:
                     print(f"[서버 통신 실패] {error}", flush=True)
                     warned = True
+                    status_failed_at = datetime.now()
             if status_ok:
                 try:
                     with urlopen(alarm_url, timeout=1.0) as res:
@@ -115,6 +136,7 @@ def main():
                     if not alarm_warned:
                         print(f"[사건 경보 조회 실패] {error}", flush=True)
                         alarm_warned = True
+                        post_log(args.server_url, "error", f"사건 경보 조회 실패: {error}")
             else:
                 publish_twice(buzzer_pub, Bool(data=False))
                 buzzer_on = False

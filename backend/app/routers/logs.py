@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.activity import record
 from app.database import get_db
 from app.models import ActivityLog
-from app.schemas import LogPage
+from app.schemas import LogPage, RobotLogCreate
 
 router = APIRouter(prefix="/logs", tags=["logs"])
 
@@ -22,3 +23,10 @@ def list_logs(
     newest = db.scalars(stmt.order_by(ActivityLog.id.desc()).limit(limit)).all()
     last_id = db.scalar(select(func.max(ActivityLog.id))) or 0
     return LogPage(last_id=last_id, entries=list(reversed(newest)))
+
+
+@router.post("", status_code=status.HTTP_204_NO_CONTENT)
+def add_log(data: RobotLogCreate, db: Session = Depends(get_db)) -> Response:
+    record(db, "robot_log", None, **data.model_dump())
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

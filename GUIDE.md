@@ -195,6 +195,7 @@ backend/
 | GET | `/status` | 로봇 상태 |
 | PUT | `/status` | 로봇이 주기적으로 갱신 (0.2초) |
 | GET | `/logs` | 쿼리: after, limit, event_id → `{ last_id, entries }`. DB(activity_logs)에 저장된 활동 로그. event_id를 주면 그 이벤트의 처리 이력만 준다 |
+| POST | `/logs` | source(1~40자), level(info·ok·warn·error), category(system·drive·route·vision·event·voice·output), message(1~1000자). robot_log로 저장하고 204 반환 |
 | GET | `/map` | 지도 정보: image_url, resolution, origin_x, origin_y. 이미지 크기는 프론트가 이미지를 불러와서 얻는다 |
 
 - 지도 파일은 `maps/`에 둔다. 브라우저는 pgm을 못 띄우므로 png로 변환해서 둔다. 실제 지도를 받기 전까지는 가짜 지도를 쓴다

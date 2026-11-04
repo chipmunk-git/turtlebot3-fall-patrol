@@ -191,6 +191,23 @@ except ServerError as error:
 self.set_state("patrol")                                  # 6. 순찰 재개
 ```
 
+## 웹 로그 전달
+
+`POST /logs`로 프로그램의 주요 메시지를 활동 로그에 추가합니다. 성공하면 본문 없이 `204`를 반환합니다.
+
+```json
+{
+  "source": "patrol",
+  "level": "warn",
+  "category": "drive",
+  "message": "정지: 라이다 수신 지연"
+}
+```
+
+`source`는 1~40자, `message`는 1~1000자입니다. `level`은 `info`, `ok`, `warn`, `error`, `category`는 `system`, `drive`, `route`, `vision`, `event`, `voice`, `output` 중 하나입니다. `GET /logs`에서 `kind: robot_log`로 조회하며 기존 `activity_logs`에 보관합니다.
+
+`my_bot_fall/patrol`은 로그 전용 스레드를 사용합니다. 전송 재시도와 종료 시간 제한, 프로그램별 표시 범위는 [웹 로그 안내](../scripts/README.md#웹에서-보는-로그)를 참고합니다. 음성 인식 문장·분류는 결과 응답 후 서버가 활동 로그에도 기록합니다.
+
 ## 3. 같이 정해야 할 것
 
 | 항목 | 선택지 | 제안 |

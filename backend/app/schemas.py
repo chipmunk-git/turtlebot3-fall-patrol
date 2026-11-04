@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, PlainSerializer
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer
 
 from app.models import DriveCommand, EventStatus, RobotState, SnapshotKind
 
@@ -69,6 +69,13 @@ class LogEntry(BaseModel):
     kind: str
     event_id: int | None
     detail: dict[str, Any]
+
+
+class RobotLogCreate(BaseModel):
+    source: str = Field(min_length=1, max_length=40)
+    level: Literal["info", "ok", "warn", "error"]
+    category: Literal["system", "drive", "route", "vision", "event", "voice", "output"]
+    message: str = Field(min_length=1, max_length=1000)
 
 
 class LogPage(BaseModel):

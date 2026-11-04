@@ -20,14 +20,18 @@ from tf2_ros import Buffer, TransformListener
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import String, Int32
+from rcl_interfaces.msg import Log
 from geometry_msgs.msg import PoseStamped
 from .smooth_base import AStarDriver, world_to_grid
 from .patrol_logic import PatrolLogic
 from .voice_link import VoiceLink, append_note, voice_note
+from .web_log import BlockTracker, WaypointTracker, WebLog, classify_reason, classify_rosout
 from .event_photo_overlay import annotate_event_photo
 
 
 class FallPatrol(AStarDriver):
+    web_log = None
+
     def __init__(self):
         self.localization_seen = 0.0
         self.localization_timeout = 2.0
@@ -78,6 +82,11 @@ class FallPatrol(AStarDriver):
         self.map_frame = p("map_frame", "map")
         self.base_frame = p("base_frame", "base_footprint")
         self.server_url = p('server_url', 'http://127.0.0.1:8000').rstrip('/')
+        self.web_log = WebLog(self.server_url, 'patrol')
+        self.block_tracker = BlockTracker()
+        self.waypoint_tracker = WaypointTracker()
+        self.last_logged_reason = None
+        self.log_started = time.monotonic()
         self.voice_enabled = bool(p('voice_enabled', True))
         self.voice.timeout = float(p('voice_timeout_sec', 90.0))
         if not math.isfinite(self.voice.timeout) or not 1 <= self.voice.timeout <= 120:
@@ -101,6 +110,8 @@ class FallPatrol(AStarDriver):
         self.state_pub = self.create_publisher(String, '/fall_patrol/state', 10)
         self.voice_pub = self.create_publisher(String, '/fall_patrol/voice_request', 10)
         self.create_subscription(String, '/fall_patrol/voice_result', self.on_voice_result, 10)
+        self.create_subscription(Log, '/rosout', self.on_rosout, 100,
+                                 callback_group=MutuallyExclusiveCallbackGroup())
         self.create_timer(0.5, self.publish_voice_request)
         self.waypoint_pub = self.create_publisher(Int32, '/fall_patrol/waypoint', 10)
         if self.journal.exists():
@@ -114,6 +125,8 @@ class FallPatrol(AStarDriver):
         self.create_timer(0.2, self.publish_state)
         self.web_thread = threading.Thread(target=self.web_worker, daemon=True)
         self.web_thread.start()
+        if self.vision_fault:
+            self.web_log.add('error', 'vision', '비전 초기화 실패: 주행 차단 (모델·라이브러리 확인 필요)')
         self.get_logger().info('my_bot_fall: test2 주행 코어 + 자세 모델 1개 + 기존 project_3 웹')
         self.get_logger().info(f'RViz 2D Goal Pose로 {self.waypoint_count}개 지점 지정 → 웹 주행 시작 버튼 대기')
 
@@ -400,7 +413,7 @@ class FallPatrol(AStarDriver):
                 self.get_logger().warn('지점 간격은 25cm 이상으로 지정하세요.')
                 return
             self.waypoints.append(point)
-            self.get_logger().info(f'{len(self.waypoints)}/{self.waypoint_count} 지점: {point}')
+            self.get_logger().info(f'{len(self.waypoints)}/{self.waypoint_count} 지점: ({point[0]:.2f}, {point[1]:.2f})')
             if len(self.waypoints) == self.waypoint_count:
                 self.logic.phase = 'ready'
                 self.logic.reason = '순찰 준비 완료: 웹 주행 시작 버튼을 누르세요'
@@ -615,9 +628,44 @@ class FallPatrol(AStarDriver):
             reasons.append('비전 오류')
         return reasons
 
+    def on_rosout(self, message):
+        match = classify_rosout(message.name, message.msg)
+        if match and self.web_log:
+            self.web_log.add(match[1], match[0], message.msg)
+
+    def report_dashboard(self, reasons):
+        """Forward state changes to the dashboard log. Must never disturb publish_state."""
+        if not self.web_log:
+            return
+        try:
+            reason = self.logic.reason
+            if reason != self.last_logged_reason:
+                self.last_logged_reason = reason
+                match = classify_reason(reason)
+                if match:
+                    if reason.startswith('연속 누움'):
+                        reason += f' (저움직임 {self.logic.still_sec:.1f}초)'
+                    self.web_log.add(match[1], match[0], reason)
+            driving = self.logic.phase == 'patrol' and self.drive_enabled
+            for level, message in self.waypoint_tracker.update(
+                    self.waypoint_index, len(self.waypoints), driving, self.wait_until is not None):
+                self.web_log.add(level, 'route', message, collapse=False)
+            # Sensors and the server are still connecting right after a start or restart.
+            # Whatever still blocks driving after this grace period is then reported as new.
+            if time.monotonic() - self.log_started < 3.0:
+                return
+            patrolling = self.logic.phase == 'patrol'
+            active = reasons if patrolling else reasons[1:]
+            for level, message in self.block_tracker.update(active, patrolling, time.monotonic()):
+                self.web_log.add(level, 'drive', message, collapse=False)
+        except Exception as error:
+            self.get_logger().warn(f'대시보드 로그 처리 실패: {error}', throttle_duration_sec=30.0)
+
     def publish_state(self):
         with self.command_lock:
-            report = ' / '.join(self.block_reasons())
+            reasons = self.block_reasons()
+            self.report_dashboard(reasons)
+            report = ' / '.join(reasons)
             if report != self.last_block_report:
                 self.get_logger().info('정지 조건: '+report if report else '출발 조건 충족')
                 self.last_block_report = report
@@ -789,6 +837,7 @@ def main(args=None):
             node.voice.end()
         node.publish_voice_request()
         node.worker_stop.set()
+        node.web_log.stop()
         executor.shutdown(timeout_sec=2.0)
         node.web_thread.join(timeout=3.0)
         node.close_camera()

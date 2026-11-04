@@ -46,6 +46,11 @@ function robotLogLabel(value) {
   return ROBOT_STATE_LABELS[value] ?? LEGACY_ROBOT_STATE_LABELS[value] ?? value;
 }
 
+const ROBOT_LOG_TAGS = {
+  system: "SYSTEM", drive: "DRIVE", route: "ROUTE", vision: "VISION",
+  event: "EVENT", voice: "VOICE", output: "OUTPUT",
+};
+const ROBOT_LOG_TONES = { info: "check", ok: "ok", warn: "warn", error: "alert" };
 const SNAPSHOT_LABELS = { detected: "① 발견", observing: "② 관찰 시작", decision: "③ 판단" };
 
 // 낙상 의심·확인 필요는 중간 단계, 조치 완료·오탐이 최종 단계다.
@@ -396,7 +401,7 @@ function renderToasts() {
             <div class="toast-body">
               <strong>${STATUS_LABELS[event.status]} <span>#${event.id}</span></strong>
               <span class="toast-meta">${formatTime(event.created_at)} · 위치 ${formatPosition(event.x, event.y)}</span>
-              <span class="toast-meta">신뢰도 ${event.confidence === null ? "-" : `${Math.round(event.confidence * 100)}%`} · 눌러서 사진 보기</span>
+              <span class="toast-meta">눌러서 사진 보기</span>
             </div>
           </div>
           <div class="actions">${actionButtons(event)}</div>
@@ -517,7 +522,6 @@ function renderRows() {
           <td>${formatTime(event.created_at)}</td>
           <td>${badge(event.status)}</td>
           <td>${formatPosition(event.x, event.y)}</td>
-          <td>${event.confidence === null ? "-" : `${Math.round(event.confidence * 100)}%`}</td>
         </tr>`,
     )
     .join("");
@@ -536,7 +540,6 @@ function renderDetail() {
     <dl class="detail-fields">
       <dt>발생</dt><dd>${formatTime(event.created_at)}</dd>
       <dt>위치</dt><dd>${formatPosition(event.x, event.y)}</dd>
-      <dt>신뢰도</dt><dd>${event.confidence === null ? "-" : `${Math.round(event.confidence * 100)}%`}</dd>
       <dt>확인</dt><dd>${formatTime(event.acknowledged_at)}</dd>
       <dt>조치 완료</dt><dd>${formatTime(event.resolved_at)}</dd>
     </dl>
@@ -968,9 +971,8 @@ function formatLog(entry) {
         ? { tag: "CHECK", tone: "check", message: `무시 구역 확인${at} → 무시 (이벤트 #${id})` }
         : { tag: "CHECK", tone: "ok", message: `무시 구역 확인${at} → 접근 허용` };
     case "event_created": {
-      const confidence = d.confidence === null ? "" : ` · 신뢰도 ${Math.round(d.confidence * 100)}%`;
       const photos = d.snapshots?.length ? ` · 사진 ${d.snapshots.length}장` : "";
-      return { tag: "EVENT", tone: "event", message: `이벤트 #${id} 생성 · ${STATUS_LABELS[d.status]}${at}${confidence}${photos}` };
+      return { tag: "EVENT", tone: "event", message: `이벤트 #${id} 생성 · ${STATUS_LABELS[d.status]}${at}${photos}` };
     }
     case "event_snapshot": {
       return { tag: "PHOTO", tone: "check", message: `이벤트 #${id} 사진 추가 · ${SNAPSHOT_LABELS[d.kind] ?? d.kind}` };
@@ -988,6 +990,12 @@ function formatLog(entry) {
       const note = visibleNote(d.note).split("\n").filter(Boolean).join(" · ");
       return { tag: "NOTE", tone: "check", message: note ? `이벤트 #${id} 메모 · ${note}` : `이벤트 #${id} 메모 삭제` };
     }
+    case "robot_log":
+      return {
+        tag: ROBOT_LOG_TAGS[d.category] ?? "ROBOT",
+        tone: ROBOT_LOG_TONES[d.level] ?? "check",
+        message: d.message,
+      };
     case "event_alarm_presented":
       return { tag: "ALARM", tone: "alert", message: `이벤트 #${id} 팝업 표시 · 부저 경보 대상 등록` };
     case "event_alarm_muted":

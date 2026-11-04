@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -33,6 +34,25 @@ fi
 
 def quote(value):
     return shlex.quote(str(value))
+
+
+def post_log(level, message):
+    """Best effort: the dashboard log must never change what the launcher does."""
+    try:
+        body = dict(source="launcher", level=level, category="system", message=message[:1000])
+        request = urllib.request.Request(f"http://127.0.0.1:{SERVER_PORT}/logs", data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(request, timeout=2):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+def report_failure(argv, error):
+    action = next((arg for arg in argv if not arg.startswith("-")), "")
+    labels = {"start": "로봇 프로그램 시작 실패", "patrol-restart": "순찰 재시작 실패"}
+    if action in labels:
+        post_log("error", labels[action] + ": " + str(error).strip())
 
 
 def shell_path(value):
@@ -112,7 +132,7 @@ def health_probe():
 
 def port_owner_script():
     """Print the working directory of the process listening on the server port."""
-    return (f"pid=$(ss -ltnpH 'sport = :{SERVER_PORT}' | grep -oP 'pid=\\K[0-9]+' | head -n1 || true)\n"
+    return (f"pid=$(ss -ltnpH 'sport = :{SERVER_PORT}' | grep -oE 'pid=[0-9]+' | head -n1 | cut -d= -f2 || true)\n"
             'owner=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)\n')
 
 
@@ -221,8 +241,17 @@ class ServerManager:
         return result.stdout.strip()
 
     def port_in_use(self):
-        # SO_REUSEADDR: only a live listener counts, not TIME_WAIT left by a server just stopped.
-        code = f"import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('0.0.0.0',{SERVER_PORT}))"
+        # Check a live loopback listener before binding; wildcard reuse varies by OS.
+        # SO_REUSEADDR allows a stopped server's TIME_WAIT sockets to be reused.
+        code = f"""import socket
+with socket.socket() as probe:
+    probe.settimeout(1)
+    if probe.connect_ex(('127.0.0.1', {SERVER_PORT})) == 0:
+        raise SystemExit(1)
+with socket.socket() as probe:
+    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    probe.bind(('0.0.0.0', {SERVER_PORT}))
+"""
         return self.bash("/usr/bin/python3 -c " + quote(code)).returncode != 0
 
     def start(self):
@@ -234,9 +263,18 @@ class ServerManager:
                                + (self.owner() or "확인 불가") + "\n그 서버를 먼저 종료하세요.")
         if self.session_exists():
             raise RuntimeError("서버 세션이 있지만 응답하지 않습니다. server-status로 확인하세요.")
+        gate = self.log_path.with_suffix(".go")
+        gate.unlink(missing_ok=True)
+        wrapper = ("while [[ ! -f " + quote(gate) + " ]]; do sleep 0.1; done\n"
+                   + "exec /bin/bash -c " + quote(server_command(self.config)))
         self.tmux("new-session", "-d", "-s", SERVER_SESSION, "-n", "fastapi",
-                  "/bin/bash", "-c", server_command(self.config))
-        self.tmux("pipe-pane", "-o", "-t", SERVER_SESSION, "cat >> " + quote(self.log_path), check=False)
+                  "/bin/bash", "-c", wrapper)
+        try:
+            self.tmux("pipe-pane", "-o", "-t", SERVER_SESSION, "cat >> " + quote(self.log_path))
+        except BaseException:
+            self.tmux("kill-session", "-t", SERVER_SESSION, check=False)
+            raise
+        gate.touch()
         deadline = self.clock() + self.config["timeout"]
         while self.clock() < deadline:
             if self.healthy():
@@ -316,6 +354,23 @@ class Launcher:
         result = self.tmux("display-message", "-p", "-t", pane, "#{pane_dead}", check=False)
         return result.returncode == 0 and result.stdout.strip() == "0"
 
+    def watch_programs(self):
+        """Report unrequested exits after the launcher has left the terminal."""
+        body = json.dumps(dict(source="launcher", level="error", category="system",
+                               message="#{window_name} 프로그램이 종료됐습니다"), ensure_ascii=False)
+        command = (f"curl -fsS --max-time 2 -X POST http://127.0.0.1:{SERVER_PORT}/logs "
+                   "-H 'Content-Type: application/json' --data " + quote(body) + " >/dev/null 2>&1")
+        try:
+            self.tmux("set-hook", "-g", "pane-died", "run-shell -b " + quote(command), check=False)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    def unwatch_programs(self):
+        try:
+            self.tmux("set-hook", "-gu", "pane-died", check=False)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
     def start_job(self, job):
         gate = self.directory / (job.name + ".go")
         command = shlex.join(self.remote(job.command, tty=True)) if job.host == "pi" else job.command
@@ -374,6 +429,7 @@ class Launcher:
             else:
                 self.tmux("set-environment", "-gu", key)
         self.save()
+        self.watch_programs()
         for number, job in enumerate(self.jobs, 1):
             print(f"[{number}/{len(self.jobs)}] {job.host} {job.name} 시작·준비 확인", flush=True)
             self.start_job(job)
@@ -404,18 +460,34 @@ class Launcher:
         """Clear the route by restarting patrol only; the other programs keep running."""
         job = next(job for job in self.jobs if job.name == "patrol")
         self.send_web_stop()
-        if not self.stop_job("patrol"):
-            raise RuntimeError("순찰이 종료되지 않았습니다. patrol 창에서 확인하세요. 나머지 프로그램은 유지합니다.")
+        post_log("info", "순찰 재시작 요청: 기존 순찰 지점은 지워집니다")
+        self.unwatch_programs()
+        try:
+            if not self.stop_job("patrol"):
+                raise RuntimeError("순찰이 종료되지 않았습니다. patrol 창에서 확인하세요. 나머지 프로그램은 유지합니다.")
+        finally:
+            self.watch_programs()
         pane = self.panes["patrol"]
+        gate = self.directory / "patrol.go"
+        gate.unlink(missing_ok=True)
         self.tmux("respawn-pane", "-t", pane)
-        # Without -o: that flag toggles an existing pipe off and would lose the log.
         self.tmux("pipe-pane", "-t", pane, "cat >> " + quote(self.directory / "patrol.log"))
+        gate.touch()
         print("순찰 재시작·준비 확인", flush=True)
         self.wait_ready(job)
+        post_log("info", "순찰 재시작 완료: RViz에서 지점을 다시 지정하세요")
         print("순찰 재시작 완료. RViz에서 지점을 다시 지정한 뒤 웹에서 주행 시작을 누르세요.\n"
               "처리하지 않은 사건이 있으면 웹에서 먼저 처리해야 지점을 지정할 수 있습니다.", flush=True)
 
     def stop(self):
+        self.unwatch_programs()
+        try:
+            self.stop_programs()
+        except BaseException:
+            self.watch_programs()
+            raise
+
+    def stop_programs(self):
         external = self.config.get("external_server")
         self.send_web_stop()
         if not self.stop_job("patrol"):
@@ -633,5 +705,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         sys.exit(130)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        report_failure(sys.argv[1:], error)
         print(str(error), file=sys.stderr)
         sys.exit(1)

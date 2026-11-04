@@ -73,7 +73,7 @@ bash scripts/demo.sh server-stop
 
 `--external-server`는 8000번 서버가 응답하는지와 **이 작업공간의 `backend`에서 실행된 서버인지** 함께 확인합니다. 다른 폴더의 서버가 8000번을 쓰고 있으면 시작을 중단합니다. 시작 과정에서 서버가 사라져도 중단합니다.
 
-서버 로그는 `log/demo/server.log`에 쌓입니다. 화면으로 보려면 `tmux -L turtlewatch-server attach`를 실행합니다. `server-stop`은 로봇 프로그램이 실행 중이면 거부하고, `server-start`로 시작하지 않은 서버는 종료하지 않습니다.
+서버 로그는 `log/demo/server.log`에 쌓입니다. 로그 연결을 마친 뒤 서버를 실행합니다. 화면으로 보려면 `tmux -L turtlewatch-server attach`를 실행합니다. `server-stop`은 로봇 프로그램이 실행 중이면 거부하고, `server-start`로 시작하지 않은 서버는 종료하지 않습니다.
 
 터미널에서 서버를 직접 실행해도 이 작업공간의 서버면 `--external-server`가 그대로 사용합니다. 이 경우 종료는 그 터미널에서 Ctrl+C로 합니다.
 
@@ -85,7 +85,7 @@ bash scripts/demo.sh server-stop
 bash scripts/demo.sh patrol-restart
 ```
 
-웹에 정지 명령을 보내고 순찰을 종료한 뒤 같은 tmux 창에서 다시 시작해 준비를 확인합니다. 나머지 프로그램은 계속 실행됩니다. 이후 RViz **2D Goal Pose**로 지점을 지정하고 웹에서 **주행 시작**을 누릅니다. 주행은 자동으로 시작하지 않습니다.
+웹에 정지 명령을 보내고 순찰을 종료한 뒤 같은 tmux 창에서 로그를 다시 연결하고 실행해 준비를 확인합니다. 나머지 프로그램은 계속 실행됩니다. 이후 RViz **2D Goal Pose**로 지점을 지정하고 웹에서 **주행 시작**을 누릅니다. 주행은 자동으로 시작하지 않습니다.
 
 처리하지 않은 사건이 있으면 경고 상태로 복구되므로 웹에서 먼저 처리해야 지점을 지정할 수 있습니다. 재시작 후 위치를 받지 못했다는 경고가 나오면 **2D Pose Estimate**를 다시 지정합니다.
 
@@ -116,6 +116,32 @@ bash scripts/demo.sh status
 각 창의 출력은 `log/demo/실행시각/` 아래 `patrol.log`, `detector.log` 등으로 보관합니다. `status`에서 프로세스 상태와 로그 폴더를 확인합니다.
 
 tmux 화면을 빠져나온 뒤에도 PC와 Pi 사이의 SSH 연결이 프로그램을 연결합니다. 네트워크 단절·PC 종료 중의 실제 정지와 복구는 장비에서 확인해야 합니다.
+
+## 웹에서 보는 로그
+
+대시보드의 실시간 로그에는 다음 메시지를 표시합니다. 전체 터미널 출력은 위의 기능별 로그 파일에서 확인합니다.
+
+| 표시 | 내용 |
+|---|---|
+| SYSTEM | 시작·순찰 재시작 실패, 순찰 재시작 요청·완료, 프로그램의 예기치 않은 종료 |
+| DRIVE·ROUTE | 정지 조건과 해소, 순찰 지점 지정·출발·도착 |
+| VISION·EVENT | 누움 의심과 판단, 선별한 비전·사건 처리 오류 |
+| VOICE | 인식 문장·분류, 음성 처리 실패 |
+| OUTPUT | 브리지 연결 오류, 출력 중계의 서버 통신 복구·사건 경보 조회 실패 |
+
+순찰은 시작 직후 3초의 연결 유예를 두고, 3초 이상 지속된 정지와 해소를 기록합니다. 순찰 중 짧게 반복된 정지는 약 30초 단위로 묶습니다. 같은 메시지의 반복도 약 30초 단위로 합칩니다. 대기↔순찰 전환은 새 상태 로그 저장에서 생략하고, 현재 로봇 상태는 계속 갱신합니다.
+
+로그는 `POST /logs`로 전달해 기존 DB의 `activity_logs`에 저장합니다. 음성 인식 문장도 활동 로그에 남습니다. 서버가 응답해야 시작 실패·프로그램 종료 알림을 웹에 기록할 수 있습니다. 수동 종료와 순찰 재시작 중에는 종료 감시를 잠시 해제합니다.
+
+순찰 로그는 별도 스레드에서 전송하고 서버 장애 중 최대 200건을 메모리에 보관합니다. 종료할 때는 전송 스레드를 최대 1초 기다리며, 전송하지 못한 로그는 유실될 수 있습니다. 음성 활동 로그는 결과 응답을 보낸 뒤 별도 DB 세션에서 저장하며, 저장 실패는 서버 터미널에 경고로 표시합니다.
+
+소스 갱신 후 서버 PC에서 `my_bot_fall`을 다시 빌드하고 FastAPI·순찰·출력 중계를 다시 실행합니다.
+
+```bash
+source /opt/ros/humble/setup.bash
+colcon build --packages-select my_bot_fall
+source install/setup.bash
+```
 
 ## 종료
 
@@ -155,6 +181,9 @@ bash scripts/demo.sh plan --robot ubuntu@ROBOT_IP --server-url http://SERVER_IP:
 
 ```bash
 backend/.venv/bin/python -B -m unittest discover -s scripts -p 'test_demo_launcher.py' -v
+backend/.venv/bin/python -B -m unittest discover -s src/dev_scripts -p 'test_status_to_arduino.py' -v
+backend/.venv/bin/python -B -m unittest discover -s backend/tests -p 'test_*.py' -v
+backend/.venv/bin/python -B -m unittest discover -s src/my_bot_fall/tests -p 'test_*.py' -v
 ```
 
-SSH·tmux 서버·ROS2·로봇·음성 장치를 사용하지 않고 순서, 인자, 준비 실패, 로그 연결과 종료 순서, 외부 서버 확인을 검사합니다. 실제 두 컴퓨터에서의 SSH 인증·장치 연결·시리얼 출력·RViz·ROS2 통신과 전체 시작·종료는 실기 확인이 필요합니다.
+SSH·tmux 서버·ROS2·로봇·음성 장치를 사용하지 않고 순서, 인자, 준비 실패, 로그 연결과 종료 순서, 외부 서버 확인을 검사합니다. 웹 로그 검사에는 종료 시간 제한, 로그 저장 실패·지연 중 음성 응답, 기존 주행·사건·음성·출력 유지가 포함됩니다. 실제 두 컴퓨터에서의 SSH 인증·장치 연결·시리얼 출력·RViz·ROS2 통신과 전체 시작·종료는 실기 확인이 필요합니다.

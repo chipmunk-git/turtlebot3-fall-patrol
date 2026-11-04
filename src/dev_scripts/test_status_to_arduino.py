@@ -14,13 +14,14 @@ from urllib.error import URLError
 
 class RelayTests(unittest.TestCase):
     def run_relay(self, states, times=None, raw_responses=False, alarms=None, raw_alarms=False,
-                  interrupt_sleep=None):
+                  interrupt_sleep=None, log_error=None):
         outputs = {}
         publishers = {}
         cleanup = []
         self.relay_outputs = outputs
         self.relay_cleanup = cleanup
         self.relay_events = []
+        self.relay_logs = []
         events = self.relay_events
         runtime = O(alive=False, sigint_shutdown=True, destroyed=False)
         class Publisher:
@@ -80,6 +81,11 @@ class RelayTests(unittest.TestCase):
                 interrupted = True
                 interrupt()
         def urlopen(url, timeout):
+            if not isinstance(url, str):
+                self.relay_logs.append(json.loads(url.data))
+                if log_error is not None:
+                    raise log_error
+                return io.StringIO('')
             if url.endswith('/events/alarms'):
                 events.append(('request', 'alarms'))
                 value = next(alarm_responses) if alarm_responses is not None else []
@@ -134,6 +140,30 @@ class RelayTests(unittest.TestCase):
         outputs, _, text, _ = self.run_relay(['idle', URLError('offline'), 'idle'], [0, 1.1])
         self.assertEqual(outputs['/tb3/rgb_led'][:-2], ['0,0,255']*4)
         self.assertIn('[서버 통신 실패]', text)
+        self.assertEqual([log['level'] for log in self.relay_logs], ['error'])
+        self.assertIn('서버 통신 실패 후 복구', self.relay_logs[0]['message'])
+
+    def test_log_delivery_failure_does_not_stop_the_relay(self):
+        outputs, _, _, relay = self.run_relay(['idle'], [0])
+        relay.urlopen = lambda *a, **k: (_ for _ in ()).throw(RuntimeError('offline'))
+        self.assertFalse(relay.post_log('http://s', 'error', 'x'))
+
+    def test_log_failure_keeps_display_updates_and_buzzer_off(self):
+        outputs, _, _, _ = self.run_relay(['idle', 'patrol'], [0, 1],
+                                         alarms=[URLError('alarm offline'), []],
+                                         log_error=URLError('log offline'))
+        self.assertEqual(outputs['/tb3/rgb_led'][:-2], ['0,0,255']*2 + ['0,255,0']*2)
+        self.assertTrue(all(value is False for value in outputs['/tb3/buzzer']))
+
+    def test_interrupt_during_log_delivery_still_turns_everything_off(self):
+        outputs, cleanup, _, _ = self.run_relay(['idle'], [0],
+                                               alarms=[URLError('alarm offline')],
+                                               log_error=KeyboardInterrupt())
+        self.assertEqual(outputs['/tb3/buzzer'][-2:], [False, False])
+        self.assertEqual(outputs['/tb3/rgb_led'][-2:], ['0,0,0', '0,0,0'])
+        self.assertEqual(outputs['/tb3/lcd_text'][-2:], ['', ''])
+        self.assertEqual(outputs['/tb3/lcd_power'][-2:], [False, False])
+        self.assertEqual(cleanup, ['node', 'ros'])
 
     def test_unknown_state_is_not_published_as_idle(self):
         outputs, _, text, _ = self.run_relay(['unknown'], [0])
@@ -252,6 +282,7 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(outputs['/tb3/lcd_text'][:-2], ['FALL SUSPECTED|STAFF CHECK']*2
                          + ['MONITORING|PATROL ACTIVE']*2 + ['OBSERVING|PLEASE WAIT']*2)
         self.assertIn('[사건 경보 조회 실패]', text)
+        self.assertIn('사건 경보 조회 실패', self.relay_logs[0]['message'])
 
     def test_malformed_alarm_response_stops_buzzer_and_polling_recovers(self):
         for body in ('not json', '{}', '[]', 'null', '{"active_event_ids": true}',

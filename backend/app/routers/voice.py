@@ -1,6 +1,7 @@
 """Voice progress, bounded inference and event-linked recording playback."""
 
 import hashlib
+import logging
 import math
 from pathlib import Path
 import subprocess
@@ -12,8 +13,8 @@ import wave
 import uuid
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -21,6 +22,7 @@ from sqlalchemy.orm import Session
 from app import config
 from app.database import get_db
 from app.models import Event, VoiceRecord
+from app.activity import record as record_activity
 from app.voice_records import ensure_voice, set_phase, voice_view, audio_path, TERMINAL
 
 # Support both repository-root and backend/ working directories without installation.
@@ -30,6 +32,20 @@ if str(PROJECT_ROOT) not in sys.path:
 from voice.stt.whisper_session import recognize_file
 
 router = APIRouter(prefix="/voice", tags=["voice"])
+logger = logging.getLogger(__name__)
+
+
+def log_voice(bind, event_id, level, message):
+    """Write after the response, in a session separate from the voice result."""
+    try:
+        with Session(bind) as db:
+            record_activity(db, "robot_log", event_id, source="server", level=level,
+                            category="voice", message=message[:1000])
+            db.commit()
+    except Exception:
+        logger.warning("음성 활동 로그를 저장하지 못했습니다.")
+
+
 MAX_AUDIO_BYTES = 192000
 INFERENCE_LOCK = threading.Lock()
 
@@ -40,14 +56,18 @@ class Progress(BaseModel):
 
 
 @router.post("/{request_id}/progress")
-def progress(request_id: str, value: Progress, db: Session = Depends(get_db)):
+def progress(request_id: str, value: Progress, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     if not math.isfinite(value.expires_at) or not 0 < value.expires_at-time.time() <= 120:
         raise HTTPException(400, "잘못되었거나 만료된 음성 요청입니다.")
     record = ensure_voice(db, request_id)
     if record.expires_at is not None and record.expires_at != value.expires_at:
         raise HTTPException(409, "음성 요청의 만료 시각이 다릅니다.")
     message = "Pi 음성 처리가 실패했습니다." if value.phase == "failed" else None
+    previous = record.phase
     record = set_phase(db, request_id, value.phase, expires_at=value.expires_at, message=message)
+    if value.phase == "failed" and previous != "failed" and record.phase == "failed":
+        background_tasks.add_task(log_voice, db.get_bind(), record.event_id,
+                                  "error", "음성 처리 실패: Pi에서 처리하지 못했습니다.")
     return voice_view(record)
 
 
@@ -78,7 +98,8 @@ def validate_wav(path):
 
 
 @router.post("/transcribe")
-def transcribe(audio: UploadFile = File(...), request_id: str = Form(..., min_length=1, max_length=100),
+def transcribe(background_tasks: BackgroundTasks, audio: UploadFile = File(...),
+               request_id: str = Form(..., min_length=1, max_length=100),
                expires_at: float = Form(...), inference_timeout: float = Form(40.0),
                silence_rms: float = Form(0.0), db: Session = Depends(get_db)) -> dict:
     # A synchronous route runs inference in FastAPI's thread pool, not its event loop.
@@ -141,13 +162,25 @@ def transcribe(audio: UploadFile = File(...), request_id: str = Form(..., min_le
             except Exception:
                 result = dict(status="error", stage="recognition", message="서버 음성 인식에 실패했습니다.")
         if time.time() >= expires_at:
-            set_phase(db, request_id, "failed", message="음성 요청이 처리 중 만료되었습니다.")
-            raise HTTPException(408, "음성 요청이 처리 중 만료되었습니다.")
+            expired = set_phase(db, request_id, "failed", message="음성 요청이 처리 중 만료되었습니다.")
+            if expired.phase == "failed":
+                background_tasks.add_task(log_voice, db.get_bind(), expired.event_id,
+                                          "error", "음성 처리 실패: 처리 중 요청이 만료되었습니다.")
+            return JSONResponse(status_code=408, content={"detail": "음성 요청이 처리 중 만료되었습니다."},
+                                background=background_tasks)
         if result["status"] == "error":
             result["classification"] = "확인 필요"
         result = dict(result, request_id=request_id)
         record = set_phase(db, request_id, "completed" if result["status"] == "ok" else "failed",
                            result=result, message=result.get("message"))
+        if record.phase == "completed":
+            classification = result.get("classification", "확인 필요")
+            background_tasks.add_task(log_voice, db.get_bind(), record.event_id,
+                                      "warn" if classification == "도움 필요" else "info",
+                                      f'음성 인식: "{result.get("text", "")}" / 분류: {classification}')
+        elif record.phase == "failed":
+            background_tasks.add_task(log_voice, db.get_bind(), record.event_id, "error",
+                                      f'음성 처리 실패({result.get("stage", "-")}): {result.get("message", "")}')
         if record.phase == "cancelled":
             return dict(status="error", request_id=request_id, stage="cancelled",
                         classification="확인 필요", message="취소된 음성 요청입니다.")
